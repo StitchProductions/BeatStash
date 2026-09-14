@@ -2,6 +2,7 @@ import Foundation
 import Testing
 @testable import BeatStash
 
+@MainActor
 struct URLParserTests {
     @Test func watchURLPassesThrough() {
         let u = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"

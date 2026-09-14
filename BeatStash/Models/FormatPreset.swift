@@ -29,7 +29,7 @@ public enum AudioFormat: String, CaseIterable, Codable, Sendable, Identifiable {
         case .m4a: return "M4A"
         case .mp3: return "MP3 320"
         case .flac: return "FLAC"
-        case .wav: return "WAV (DAW-ready)"
+        case .wav: return "WAV"
         }
     }
 

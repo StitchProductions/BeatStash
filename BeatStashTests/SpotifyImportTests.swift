@@ -136,6 +136,18 @@ struct SpotifyImportTests {
         #expect(YouTubeMatcher.videoID(from: "not a url") == nil)
     }
 
+    @Test func adjudicationRule() {
+        // Clear winners skip MusicBrainz entirely.
+        #expect(!YouTubeMatcher.needsAdjudication(best: 0.82, runnerUp: 0.4))
+        #expect(!YouTubeMatcher.needsAdjudication(best: 0.95, runnerUp: nil))
+        // Weak bests always consult.
+        #expect(YouTubeMatcher.needsAdjudication(best: 0.4, runnerUp: 0.1))
+        #expect(YouTubeMatcher.needsAdjudication(best: 0.0, runnerUp: nil))
+        // Close races consult even when strong.
+        #expect(YouTubeMatcher.needsAdjudication(best: 0.85, runnerUp: 0.78))
+        #expect(!YouTubeMatcher.needsAdjudication(best: 0.85, runnerUp: 0.5))
+    }
+
     @Test func exactReconciliation() {
         let cands = [
             candidate(title: "A", uploader: "U", duration: 200),
@@ -149,7 +161,7 @@ struct SpotifyImportTests {
         #expect(YouTubeMatcher.exactMatchIDs(mbURLs: [], candidates: [a]).isEmpty)
     }
 
-    @Test func matchCacheRoundTripAndTTL() async {
+    @Test func matchCacheRoundTripAndTTL() {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("BeatStashTests-\(UUID().uuidString)", isDirectory: true)
         try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -157,11 +169,11 @@ struct SpotifyImportTests {
         YouTubeMatcher.matchCacheFileOverride = dir.appendingPathComponent("match-cache.json")
         defer { YouTubeMatcher.matchCacheFileOverride = nil }
 
-        #expect(await YouTubeMatcher.readMatchCache().isEmpty)
+        #expect(YouTubeMatcher.readMatchCache().isEmpty)
         let fresh = CachedMatch(youtubeID: "abc123XYZ_-", score: 0.87,
                                 youtubeTitle: "T", duration: 200, exact: false)
-        await YouTubeMatcher.writeMatchCache(["spotify:track1": fresh])
-        let back = await YouTubeMatcher.readMatchCache()
+        YouTubeMatcher.writeMatchCache(["spotify:track1": fresh])
+        let back = YouTubeMatcher.readMatchCache()
         #expect(back["spotify:track1"]?.youtubeID == "abc123XYZ_-")
         #expect(back["spotify:track1"]?.score == 0.87)
 
@@ -170,8 +182,8 @@ struct SpotifyImportTests {
         stale["old"] = CachedMatch(youtubeID: "z", score: 1, youtubeTitle: "O",
                                    duration: nil, exact: true,
                                    at: Date(timeIntervalSince1970: 0))
-        await YouTubeMatcher.writeMatchCache(stale)
-        let pruned = await YouTubeMatcher.readMatchCache()
+        YouTubeMatcher.writeMatchCache(stale)
+        let pruned = YouTubeMatcher.readMatchCache()
         #expect(pruned["old"] == nil)
         #expect(pruned["spotify:track1"] != nil)
     }

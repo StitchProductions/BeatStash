@@ -3,7 +3,7 @@ import Foundation
 /// Validates + normalizes YouTube URLs. Public/unlisted only in v1
 /// (no cookie/auth support for private playlists).
 public enum URLParser: Sendable {
-    public enum Kind: Sendable {
+    public enum Kind: Sendable, Equatable {
         case video
         case playlist
         case shorts

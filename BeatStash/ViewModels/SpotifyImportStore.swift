@@ -33,16 +33,38 @@ public struct SpotifyImportTrack: Identifiable, Sendable {
         if case .matched(let score, _, _, _, _) = status { return score }
         return nil
     }
+
+    public var isMatched: Bool {
+        if case .matched = status { return true }
+        return false
+    }
 }
 
 /// Spotify → YouTube import: playlist/track links in, matched drafts out.
 ///
 /// Pipeline per track (all serial — every surface throttles or paces):
 /// oEmbed metadata (~0.2s) + Deezer anchor (~0.3s) → `ytsearch5` (~13s) →
-/// score → MusicBrainz only when uncertain (paced ≥1.1s, silent degrade).
+/// score → optional MusicBrainz confidence check when uncertain
+/// (paced ≥1.1s, silent degrade; OFF by default — see Settings).
 /// Matches land in the New Batch drafts; nothing downloads from here.
 @Observable
 final class SpotifyImportStore {
+    /// UserDefaults key for the optional post-score MusicBrainz check.
+    /// OFF by default: enabling slows matching (2+ extra requests per
+    /// ambiguous track). Settings toggles this via @AppStorage on the same key.
+    static let confidenceCheckKey = "spotifyConfidenceCheckEnabled"
+
+    /// Live read-through so Settings (@AppStorage) and the store never drift.
+    static var confidenceCheckEnabled: Bool {
+        UserDefaults.standard.object(forKey: confidenceCheckKey) as? Bool ?? false
+    }
+
+    /// Instance access for views/tests (computed — source of truth is UserDefaults).
+    var enableConfidenceCheck: Bool {
+        get { Self.confidenceCheckEnabled }
+        set { UserDefaults.standard.set(newValue, forKey: Self.confidenceCheckKey) }
+    }
+
     var urlText: String = ""
     var isImporting = false
     var progress: String?
@@ -53,6 +75,10 @@ final class SpotifyImportStore {
     private var importTask: Task<Void, Never>?
     private var importSession: UUID?
     private let service = YTDLPService()
+
+    /// Politeness gap between searches (the per-search 5s/15s backoff is the
+    /// real throttle protection; this just avoids burst spawns).
+    private static let interSearchDelay: TimeInterval = 0.5
 
     /// Session memo by Spotify track ID (re-imports don't re-search).
     /// Disk match cache (30d, same key) survives relaunches; both store the
@@ -80,6 +106,32 @@ final class SpotifyImportStore {
 
     var selectedCount: Int {
         tracks.filter { $0.selected }.count
+    }
+
+    /// Selected rows that are actually addable (matched). The Add button
+    /// promises this count — `selectedCount` can include .working/.failed
+    /// rows when Select-all ran mid-import, which handoff must skip.
+    var selectedMatchedCount: Int {
+        tracks.filter { $0.selected && $0.isMatched }.count
+    }
+
+    /// Add is only available once matching has settled (prevents the
+    /// "button said 50, New Batch got 1" trap from adding mid-import).
+    var canAddToBatch: Bool {
+        !isImporting && selectedMatchedCount > 0
+    }
+
+    /// Select-all state over match-selectable rows only (per-row toggles are
+    /// disabled for non-matched, so Select-all must not tick them either).
+    var allSelectableSelected: Bool {
+        let selectable = tracks.filter { $0.isMatched }
+        return !selectable.isEmpty && selectable.allSatisfy { $0.selected }
+    }
+
+    func setAllSelectable(_ v: Bool) {
+        for i in tracks.indices where tracks[i].isMatched {
+            tracks[i].selected = v
+        }
     }
 
     // MARK: - Import
@@ -132,7 +184,7 @@ final class SpotifyImportStore {
                 ids = [id]
             }
             var done = 0
-            diskMatches = await YouTubeMatcher.readMatchCache()
+            diskMatches = YouTubeMatcher.readMatchCache()
             // Phase A: rows + Tier-1 metadata (4-wide chunks — cheap surfaces).
             for trackID in ids {
                 tracks.append(SpotifyImportTrack(id: trackID))
@@ -140,12 +192,11 @@ final class SpotifyImportStore {
             try await resolveTier1Chunked(ids: ids)
             guard importSession == session else { return }
             // Phase B: serial matching (throttle-proven) with inter-search pacing.
-            var n = 0
             for (idx, trackID) in ids.enumerated() {
                 try Task.checkCancellation()
                 guard importSession == session else { return }
-                if n > 0 {
-                    try await Task.sleep(nanoseconds: 2_000_000_000)
+                if done > 0 {
+                    try await Task.sleep(nanoseconds: UInt64(Self.interSearchDelay * 1_000_000_000))
                     guard importSession == session else { return }
                 }
                 if ids.count > 1 { progress = "Matching \(done + 1)/\(ids.count)…" }
@@ -264,42 +315,71 @@ final class SpotifyImportStore {
                 query: query.isEmpty ? tracks[idx].title : query)
             let anchor = tracks[idx].deezerDuration
             var best: (entry: PlaylistEntry, score: Double)?
+            var runnerUp: Double?
             for c in candidates {
                 let s = YouTubeMatcher.score(
                     artist: tracks[idx].artist, title: tracks[idx].title,
                     anchorDuration: anchor, candidate: c)
-                if best == nil || s > best!.score { best = (c, s) }
-            }
-
-            // Tier 3 (uncertain only): MusicBrainz duration re-score + curated URLs.
-            var exact = false
-            var final = best
-            if (best?.score ?? 0) < 0.9 {
-                try Task.checkCancellation()
-                if let mb = await MusicBrainzClient.searchRecording(
-                    artist: tracks[idx].artist, title: tracks[idx].title) {
-                    let rels = await MusicBrainzClient.youtubeURLs(mbid: mb.id)
-                    let exactIDs = YouTubeMatcher.exactMatchIDs(mbURLs: rels, candidates: candidates)
-                    if let hit = candidates.first(where: { exactIDs.contains($0.id) }) {
-                        final = (hit, 1.0)
-                        exact = true
-                    } else if let b = best, let mbLen = mb.lengthSeconds {
-                        let rescored = YouTubeMatcher.score(
-                            artist: tracks[idx].artist, title: tracks[idx].title,
-                            anchorDuration: mbLen, candidate: b.entry)
-                        final = (b.entry, max(b.score, rescored))
-                    }
+                if best == nil || s > best!.score {
+                    runnerUp = best?.score
+                    best = (c, s)
+                } else if runnerUp == nil || s > runnerUp! {
+                    runnerUp = s
                 }
             }
 
-            guard let final else {
+            guard let best else {
                 tracks[idx].status = .failed("No YouTube match")
                 return
             }
-            await recordMatch(idx: idx, id: id, score: final.score,
-                              youtubeID: final.entry.id,
-                              youtubeTitle: final.entry.safeTitle,
-                              duration: final.entry.duration, exact: exact)
+            // Paint immediately: the badge is visible the moment scoring lands.
+            // MusicBrainz below only ever upgrades (exact/rescored) from here.
+            applyMatch(idx: idx, score: best.score, youtubeID: best.entry.id,
+                       youtubeTitle: best.entry.safeTitle,
+                       duration: best.entry.duration, exact: false)
+            let preSelect = tracks[idx].selected
+
+            // Tier 3 (ambiguous only, opt-in): MusicBrainz duration re-score +
+            // curated URLs. OFF by default — each consultation costs 2+ paced
+            // requests. Clear winners skip MB entirely even when enabled.
+            guard Self.confidenceCheckEnabled,
+                  YouTubeMatcher.needsAdjudication(best: best.score, runnerUp: runnerUp) else {
+                recordMatch(idx: idx, id: id, score: best.score,
+                            youtubeID: best.entry.id,
+                            youtubeTitle: best.entry.safeTitle,
+                            duration: best.entry.duration, exact: false)
+                return
+            }
+            try Task.checkCancellation()
+            var exact = false
+            var final = best
+            if let mb = await MusicBrainzClient.searchRecording(
+                artist: tracks[idx].artist, title: tracks[idx].title) {
+                let rels = await MusicBrainzClient.youtubeURLs(mbid: mb.id)
+                let exactIDs = YouTubeMatcher.exactMatchIDs(mbURLs: rels, candidates: candidates)
+                if let hit = candidates.first(where: { exactIDs.contains($0.id) }) {
+                    final = (hit, 1.0)
+                    exact = true
+                } else if let mbLen = mb.lengthSeconds {
+                    let rescored = YouTubeMatcher.score(
+                        artist: tracks[idx].artist, title: tracks[idx].title,
+                        anchorDuration: mbLen, candidate: best.entry)
+                    final = (best.entry, max(best.score, rescored))
+                }
+            }
+
+            recordMatch(idx: idx, id: id, score: final.score,
+                        youtubeID: final.entry.id,
+                        youtubeTitle: final.entry.safeTitle,
+                        duration: final.entry.duration, exact: exact)
+            // Preserve a manual tick/untick made while MB was resolving:
+            // recordMatch recomputes selection from score, so restore a choice
+            // that differs from the recomputed value.
+            let autoValue = final.score >= YouTubeMatcher.autoSelectThreshold || exact
+            if tracks.indices.contains(idx), tracks[idx].selected == autoValue,
+               preSelect != autoValue {
+                tracks[idx].selected = preSelect
+            }
         } catch is CancellationError {
             tracks[idx].status = .failed("Cancelled")
         } catch {
@@ -309,7 +389,7 @@ final class SpotifyImportStore {
 
     /// Writes a match to row + session memo + disk cache.
     private func recordMatch(idx: Int, id: String, score: Double, youtubeID: String,
-                             youtubeTitle: String, duration: Double?, exact: Bool) async {
+                             youtubeTitle: String, duration: Double?, exact: Bool) {
         memo[id] = Memo(title: tracks[idx].title, artist: tracks[idx].artist,
                         artworkURL: tracks[idx].artworkURL, score: score,
                         youtubeID: youtubeID, youtubeTitle: youtubeTitle,
@@ -319,7 +399,7 @@ final class SpotifyImportStore {
                                 youtubeTitle: youtubeTitle, duration: duration,
                                 exact: exact)
         diskMatches = cache
-        await YouTubeMatcher.writeMatchCache(cache)
+        YouTubeMatcher.writeMatchCache(cache)
         applyMatch(idx: idx, score: score, youtubeID: youtubeID,
                    youtubeTitle: youtubeTitle, duration: duration, exact: exact)
     }
@@ -394,16 +474,19 @@ final class SpotifyImportStore {
     /// playlist name as album) and returns how many were added.
     @discardableResult
     func addSelectedToBatch(_ store: DownloadStore) -> Int {
-        let picked = tracks.filter { $0.selected }
-        guard !picked.isEmpty else { return 0 }
+        // Only matched rows are addable — Select-all no longer ticks
+        // .working/.failed, but filter defensively so the count returned
+        // always equals the rows actually appended.
+        let matchedPicked = tracks.filter { $0.selected && $0.isMatched }
+        guard !matchedPicked.isEmpty else { return 0 }
         let wasEmpty = store.draftJobs.isEmpty
         var added = 0
-        for (offset, t) in picked.enumerated() {
+        for t in matchedPicked {
             guard case .matched(_, let youtubeID, _, let duration, _) = t.status else { continue }
             let album = playlistTitle ?? t.deezerAlbum
             let tags = TagParser.parse(
                 title: t.title, uploader: t.artist,
-                playlistTitle: album, playlistIndex: album != nil ? offset + 1 : nil,
+                playlistTitle: album, playlistIndex: album != nil ? added + 1 : nil,
                 uploadDate: nil)
             store.draftJobs.append(DownloadJob(
                 url: "https://www.youtube.com/watch?v=\(youtubeID)",
@@ -418,7 +501,7 @@ final class SpotifyImportStore {
             added += 1
         }
         if wasEmpty {
-            store.probeTitle = playlistTitle ?? picked.first?.title
+            store.probeTitle = playlistTitle ?? matchedPicked.first?.title
         }
         if added > 0 {
             NotificationCenter.default.post(name: .beatStashShowNewBatch, object: nil)

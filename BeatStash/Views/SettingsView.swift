@@ -14,6 +14,7 @@ struct SettingsView: View {
     @AppStorage("ytAuth.poToken") private var poToken: String = ""
     @AppStorage("ytAuth.forceIPv4") private var forceIPv4: Bool = true
     @AppStorage("ytDlpChannel") private var channelRaw: String = BinaryManager.Channel.stable.rawValue
+    @AppStorage("spotifyConfidenceCheckEnabled") private var confidenceCheckEnabled: Bool = false
 
     @State private var updateOutput: String?
     @State private var isUpdating = false
@@ -55,6 +56,16 @@ struct SettingsView: View {
                 }
                 Stepper("Parallel downloads: \(maxConcurrent)", value: $maxConcurrent, in: 1...5)
                     .onChange(of: maxConcurrent) { _, new in store.maxConcurrent = new }
+            }
+
+            Section("Spotify") {
+                Toggle("Confidence check (MusicBrainz)", isOn: $confidenceCheckEnabled)
+                Text("Slows down matching — extra requests per ambiguous track.")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                Text("Off by default. Matches use title, artist and duration only. When on, uncertain matches get a MusicBrainz cross-check that can upgrade to Exact.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Tools (yt-dlp + ffmpeg)") {

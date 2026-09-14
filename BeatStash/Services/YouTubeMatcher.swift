@@ -35,22 +35,32 @@ public struct CachedMatch: Codable, Sendable {
 public enum YouTubeMatcher: Sendable {
     public static let autoSelectThreshold = 0.5
 
+    /// MusicBrainz adjudication rule: consult MB only when it can change the
+    /// answer — a weak best, or a close race. Clear winners skip MB entirely
+    /// (each consultation costs 2+ paced requests that usually 503 anyway).
+    /// Pure (tested).
+    nonisolated public static func needsAdjudication(best: Double, runnerUp: Double?) -> Bool {
+        if best < 0.7 { return true }
+        return (best - (runnerUp ?? 0)) < 0.15
+    }
+
     /// Match outcomes live 30 days: recordings don't move. Failures are never
     /// cached (transient by nature).
-    static let matchCacheTTL: TimeInterval = 30 * 24 * 3600
-    static let matchCacheCap = 2000
+    static nonisolated let matchCacheTTL: TimeInterval = 30 * 24 * 3600
+    static nonisolated let matchCacheCap = 2000
 
     /// Test seam: redirect the cache file.
-    @MainActor static var matchCacheFileOverride: URL?
+    nonisolated(unsafe) static var matchCacheFileOverride: URL?
 
-    @MainActor static func matchCacheFile() -> URL {
+    nonisolated static func matchCacheFile() -> URL {
         matchCacheFileOverride ?? FileManager.default.urls(
             for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("BeatStash/match-cache.json", isDirectory: false)
     }
 
-    /// Reads + TTL-prunes. MainActor: Codable lives there with the models.
-    @MainActor static func readMatchCache() -> [String: CachedMatch] {
+    /// Reads + TTL-prunes. Pure file I/O (`nonisolated`) so `swift-testing`
+    /// `#expect` doesn't wrap same-actor sync calls in a needless `await`.
+    nonisolated static func readMatchCache() -> [String: CachedMatch] {
         guard let data = try? Data(contentsOf: matchCacheFile()) else { return [:] }
         guard var cache = try? JSONDecoder().decode([String: CachedMatch].self, from: data) else { return [:] }
         cache = cache.filter { Date().timeIntervalSince($0.value.at) < matchCacheTTL }
@@ -58,7 +68,7 @@ public enum YouTubeMatcher: Sendable {
     }
 
     /// Prunes (TTL + cap) and persists.
-    @MainActor static func writeMatchCache(_ cache: [String: CachedMatch]) {
+    nonisolated static func writeMatchCache(_ cache: [String: CachedMatch]) {
         var pruned = cache.filter { Date().timeIntervalSince($0.value.at) < matchCacheTTL }
         if pruned.count > matchCacheCap {
             let newest = pruned.sorted { $0.value.at > $1.value.at }.prefix(matchCacheCap)

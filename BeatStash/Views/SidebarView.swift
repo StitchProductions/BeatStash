@@ -47,13 +47,20 @@ struct SidebarView: View {
                 Text("Made with 💚 by Stitch")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                    .truncationMode(.tail)
                 Text("Made possibly by yt-dlp")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                    .truncationMode(.tail)
                 if !store.binariesReady {
                     Text("Setup needed")
                         .font(.caption2)
                         .foregroundStyle(.orange)
+                        .lineLimit(1)
                 }
             }
             .padding(.horizontal)

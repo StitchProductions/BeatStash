@@ -77,14 +77,14 @@ struct SpotifyView: View {
             // Track list
             if !imports.tracks.isEmpty {
                 HStack {
-                    Button(imports.tracks.allSatisfy({ $0.selected }) ? "Deselect all" : "Select all") {
-                        let v = !imports.tracks.allSatisfy({ $0.selected })
-                        for i in imports.tracks.indices { imports.tracks[i].selected = v }
+                    Button(imports.allSelectableSelected ? "Deselect all" : "Select all") {
+                        imports.setAllSelectable(!imports.allSelectableSelected)
                     }
                     .buttonStyle(.link)
+                    .disabled(imports.matchedCount == 0)
                     Text("•")
                         .foregroundStyle(.secondary)
-                    Text("\(imports.selectedCount) of \(imports.tracks.count) selected")
+                    Text("\(imports.selectedMatchedCount) of \(imports.tracks.count) selected")
                         .foregroundStyle(.secondary)
                     Spacer()
                     Text("\(imports.matchedCount) matched")
@@ -108,17 +108,25 @@ struct SpotifyView: View {
                 .listStyle(.inset)
 
                 HStack {
-                    Text("Match % = title, artist authority, duration anchor, MusicBrainz exact links. Unticked rows need review.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Match % = title, artist authority, duration anchor, MusicBrainz exact links. Unticked rows need review.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if imports.isImporting {
+                            Text("Matching… Add is available when done.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                     Spacer()
                     Button {
                         _ = imports.addSelectedToBatch(store)
                     } label: {
-                        Label("Add \(imports.selectedCount) to New Batch", systemImage: "plus.circle.fill")
+                        Label("Add \(imports.selectedMatchedCount) to New Batch", systemImage: "plus.circle.fill")
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(imports.selectedCount == 0)
+                    .disabled(!imports.canAddToBatch)
+                    .help(imports.isImporting ? "Wait until matching finishes" : "Add selected matches to New Batch")
                 }
                 .padding()
                 .background(.bar)
