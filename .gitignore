@@ -1,0 +1,8 @@
+.DS_Store
+build/
+DerivedData/
+*.xcuserdata
+Vendor/bin/
+BeatStash/Resources/bin/yt-dlp
+BeatStash/Resources/bin/ffmpeg
+BeatStash/Resources/bin/ffprobe
