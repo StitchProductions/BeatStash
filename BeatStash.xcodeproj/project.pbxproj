@@ -6,11 +6,27 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXContainerItemProxy section */
+		3D3FEC6830580BAF0006FF8F /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 3DD6FE9330512277009BAF80 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 3DD6FE9A30512277009BAF80;
+			remoteInfo = BeatStash;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
+		3D3FEC6430580BAF0006FF8F /* BeatStashTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = BeatStashTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3DD6FE9B30512277009BAF80 /* BeatStash.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BeatStash.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
+		3D3FEC6530580BAF0006FF8F /* BeatStashTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = BeatStashTests;
+			sourceTree = "<group>";
+		};
 		3DD6FE9D30512277009BAF80 /* BeatStash */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			path = BeatStash;
@@ -19,6 +35,13 @@
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		3D3FEC6130580BAF0006FF8F /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		3DD6FE9830512277009BAF80 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -33,6 +56,7 @@
 			isa = PBXGroup;
 			children = (
 				3DD6FE9D30512277009BAF80 /* BeatStash */,
+				3D3FEC6530580BAF0006FF8F /* BeatStashTests */,
 				3DD6FE9C30512277009BAF80 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -41,6 +65,7 @@
 			isa = PBXGroup;
 			children = (
 				3DD6FE9B30512277009BAF80 /* BeatStash.app */,
+				3D3FEC6430580BAF0006FF8F /* BeatStashTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -48,6 +73,29 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		3D3FEC6330580BAF0006FF8F /* BeatStashTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 3D3FEC6C30580BAF0006FF8F /* Build configuration list for PBXNativeTarget "BeatStashTests" */;
+			buildPhases = (
+				3D3FEC6030580BAF0006FF8F /* Sources */,
+				3D3FEC6130580BAF0006FF8F /* Frameworks */,
+				3D3FEC6230580BAF0006FF8F /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				3D3FEC6930580BAF0006FF8F /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				3D3FEC6530580BAF0006FF8F /* BeatStashTests */,
+			);
+			name = BeatStashTests;
+			packageProductDependencies = (
+			);
+			productName = BeatStashTests;
+			productReference = 3D3FEC6430580BAF0006FF8F /* BeatStashTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 		3DD6FE9A30512277009BAF80 /* BeatStash */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 3DD6FEA630512278009BAF80 /* Build configuration list for PBXNativeTarget "BeatStash" */;
@@ -81,6 +129,10 @@
 				LastSwiftUpdateCheck = 2660;
 				LastUpgradeCheck = 2660;
 				TargetAttributes = {
+					3D3FEC6330580BAF0006FF8F = {
+						CreatedOnToolsVersion = 26.6;
+						TestTargetID = 3DD6FE9A30512277009BAF80;
+					};
 					3DD6FE9A30512277009BAF80 = {
 						CreatedOnToolsVersion = 26.6;
 					};
@@ -101,11 +153,19 @@
 			projectRoot = "";
 			targets = (
 				3DD6FE9A30512277009BAF80 /* BeatStash */,
+				3D3FEC6330580BAF0006FF8F /* BeatStashTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		3D3FEC6230580BAF0006FF8F /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		3DD6FE9930512277009BAF80 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -134,11 +194,18 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -e\nSRC_BIN=\"$SRCROOT/BeatStash/Resources/bin\"\nDST_BIN=\"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/bin\"\nmkdir -p \"$SRC_BIN\" \"$DST_BIN\"\n# Self-heal: yt-dlp is one portable file — fetch it when absent so a fresh\n# clone can never silently produce an app without it.\nif [ ! -f \"$SRC_BIN/yt-dlp\" ]; then\n  echo \"note: yt-dlp missing from $SRC_BIN - downloading stable release...\"\n  curl -L --fail \"https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos\" -o \"$SRC_BIN/yt-dlp\"\n  chmod +x \"$SRC_BIN/yt-dlp\"\nfi\nfor tool in yt-dlp ffmpeg ffprobe; do\n  if [ -f \"$SRC_BIN/$tool\" ]; then\n    cp -f \"$SRC_BIN/$tool\" \"$DST_BIN/$tool\"\n    chmod +x \"$DST_BIN/$tool\"\n    xattr -cr \"$DST_BIN/$tool\" || true\n    codesign -s - --timestamp=none \"$DST_BIN/$tool\" || true\n  else\n    echo \"error: $SRC_BIN/$tool not found - run scripts/setup-binaries.sh, then rebuild\"\n    exit 1\n  fi\ndone\nSRC_PLUGINS=\"$SRCROOT/BeatStash/Resources/plugins\"\nif [ -d \"$SRC_PLUGINS\" ] && [ -n \"$(ls -A \"$SRC_PLUGINS\" 2>/dev/null)\" ]; then\n  DST_PLUGINS=\"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/plugins\"\n  mkdir -p \"$DST_PLUGINS\"\n  cp -Rf \"$SRC_PLUGINS/.\" \"$DST_PLUGINS/\"\nfi\necho \"note: bundled tools:\"\nfor tool in yt-dlp ffmpeg ffprobe; do\n  ver=\"$(\"$DST_BIN/$tool\" --version 2>&1 | head -1)\"\n  echo \"note:   $tool ${ver:-MISSING}\"\ndone\n";
+			shellScript = "set -e\nSRC_BIN=\"$SRCROOT/BeatStash/Resources/bin\"\nDST_BIN=\"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/bin\"\nmkdir -p \"$SRC_BIN\" \"$DST_BIN\"\n# Self-heal: yt-dlp is one portable file — fetch it when absent so a fresh\n# clone can never silently produce an app without it.\nif [ ! -f \"$SRC_BIN/yt-dlp\" ]; then\n  echo \"note: yt-dlp missing from $SRC_BIN - downloading stable release...\"\n  curl -L --fail \"https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos\" -o \"$SRC_BIN/yt-dlp\"\n  chmod +x \"$SRC_BIN/yt-dlp\"\nfi\nfor tool in yt-dlp ffmpeg ffprobe; do\n  if [ -f \"$SRC_BIN/$tool\" ]; then\n    cp -f \"$SRC_BIN/$tool\" \"$DST_BIN/$tool\"\n    chmod +x \"$DST_BIN/$tool\"\n    xattr -cr \"$DST_BIN/$tool\" || true\n    codesign -s - --timestamp=none \"$DST_BIN/$tool\" || true\n  else\n    echo \"error: $SRC_BIN/$tool not found - run scripts/setup-binaries.sh, then rebuild\"\n    exit 1\n  fi\ndone\nSRC_PLUGINS=\"$SRCROOT/BeatStash/Resources/plugins\"\nif [ -d \"$SRC_PLUGINS\" ] && [ -n \"$(ls -A \"$SRC_PLUGINS\" 2>/dev/null)\" ]; then\n  DST_PLUGINS=\"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/plugins\"\n  mkdir -p \"$DST_PLUGINS\"\n  cp -Rf \"$SRC_PLUGINS/.\" \"$DST_PLUGINS/\"\nfi\n# Intel + Apple Silicon: every bundled tool must stay universal so neither\n# architecture silently breaks when a future fetch ships a thin binary.\nfor tool in yt-dlp ffmpeg ffprobe; do\n  if ! lipo -info \"$DST_BIN/$tool\" 2>/dev/null | grep -q \"x86_64 arm64\"; then\n    echo \"error: $DST_BIN/$tool is not universal (x86_64+arm64) - refusing to bundle\"\n    exit 1\n  fi\ndone\necho \"note: bundled tools:\"\nfor tool in yt-dlp ffmpeg ffprobe; do\n  ver=\"$(\"$DST_BIN/$tool\" --version 2>&1 | head -1)\"\n  echo \"note:   $tool ${ver:-MISSING}\"\ndone\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		3D3FEC6030580BAF0006FF8F /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		3DD6FE9730512277009BAF80 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -148,7 +215,55 @@
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		3D3FEC6930580BAF0006FF8F /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 3DD6FE9A30512277009BAF80 /* BeatStash */;
+			targetProxy = 3D3FEC6830580BAF0006FF8F /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
+		3D3FEC6A30580BAF0006FF8F /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = StitchProductions.BeatStashTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/BeatStash.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/BeatStash";
+			};
+			name = Debug;
+		};
+		3D3FEC6B30580BAF0006FF8F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 26.5;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = StitchProductions.BeatStashTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				STRING_CATALOG_GENERATE_SYMBOLS = NO;
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/BeatStash.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/BeatStash";
+			};
+			name = Release;
+		};
 		3DD6FEA430512278009BAF80 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -332,6 +447,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		3D3FEC6C30580BAF0006FF8F /* Build configuration list for PBXNativeTarget "BeatStashTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				3D3FEC6A30580BAF0006FF8F /* Debug */,
+				3D3FEC6B30580BAF0006FF8F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		3DD6FE9630512277009BAF80 /* Build configuration list for PBXProject "BeatStash" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

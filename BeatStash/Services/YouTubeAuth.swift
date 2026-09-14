@@ -27,7 +27,7 @@ public struct YouTubeAuth: Codable, Sendable, Equatable {
         case file
 
         public var id: String { rawValue }
-        public var displayName: String {
+        public nonisolated var displayName: String {
             switch self {
             case .off: return "Off (anonymous)"
             case .browser: return "Read from browser"
@@ -36,15 +36,18 @@ public struct YouTubeAuth: Codable, Sendable, Equatable {
         }
     }
 
-    public var cookieMode: CookieMode
-    public var browser: String // firefox | chrome | brave | edge | safari
-    public var cookieFilePath: String? // managed copy in Application Support
-    public var manualPoToken: String // raw `web.gvs+...` value for debugging
+    // Immutable-after-load config: safe to read from any isolation.
+    // (`nonisolated(unsafe)` because the project default is MainActor while
+    // these pure helpers must run on the probe actor and in tests.)
+    public nonisolated(unsafe) var cookieMode: CookieMode
+    public nonisolated(unsafe) var browser: String // firefox | chrome | brave | edge | safari
+    public nonisolated(unsafe) var cookieFilePath: String? // managed copy in Application Support
+    public nonisolated(unsafe) var manualPoToken: String // raw `web.gvs+...` value for debugging
     /// Measured ~30% faster probes (broken/slow IPv6 stalls every request).
     /// Default on; the Settings toggle still opts out.
-    public var forceIPv4: Bool
+    public nonisolated(unsafe) var forceIPv4: Bool
 
-    public init(
+    public nonisolated init(
         cookieMode: CookieMode = .off,
         browser: String = "firefox",
         cookieFilePath: String? = nil,
@@ -58,7 +61,7 @@ public struct YouTubeAuth: Codable, Sendable, Equatable {
         self.forceIPv4 = forceIPv4
     }
 
-    public var hasCookies: Bool {
+    public nonisolated var hasCookies: Bool {
         switch cookieMode {
         case .off: return false
         case .browser: return !browser.isEmpty
@@ -70,9 +73,9 @@ public struct YouTubeAuth: Codable, Sendable, Equatable {
 
     // MARK: - Persistence
 
-    private static let prefix = "ytAuth."
+    private nonisolated static let prefix = "ytAuth."
 
-    public static func load(defaults: UserDefaults = .standard) -> YouTubeAuth {
+    public nonisolated static func load(defaults: UserDefaults = .standard) -> YouTubeAuth {
         var auth = YouTubeAuth()
         if let raw = defaults.string(forKey: prefix + "cookieMode"),
            let m = CookieMode(rawValue: raw) { auth.cookieMode = m }
@@ -85,7 +88,7 @@ public struct YouTubeAuth: Codable, Sendable, Equatable {
         return auth
     }
 
-    public func save(defaults: UserDefaults = .standard) {
+    public nonisolated func save(defaults: UserDefaults = .standard) {
         defaults.set(cookieMode.rawValue, forKey: Self.prefix + "cookieMode")
         defaults.set(browser, forKey: Self.prefix + "browser")
         defaults.set(cookieFilePath, forKey: Self.prefix + "cookieFile")
@@ -96,7 +99,7 @@ public struct YouTubeAuth: Codable, Sendable, Equatable {
     // MARK: - yt-dlp argument builders (pure, testable)
 
     /// Auth-only flags, shared by probe + download invocations.
-    public func authArgs() -> [String] {
+    public nonisolated func authArgs() -> [String] {
         var args: [String] = []
         switch cookieMode {
         case .off: break
@@ -121,7 +124,7 @@ public struct YouTubeAuth: Codable, Sendable, Equatable {
     /// Verified 2026-09-14 against `youtu.be/5tBG5f3EQNc`:
     /// `android,ios,tv` extracts; `tv,web_safari` → "needs reload";
     /// `mweb`/`web_safari` alone → "format not available".
-    public func clientChains() -> [[String]] {
+    public nonisolated func clientChains() -> [[String]] {
         if hasCookies {
             // Never tv+cookies: TV auth differs and invalidates the session.
             return [
@@ -137,13 +140,13 @@ public struct YouTubeAuth: Codable, Sendable, Equatable {
         ]
     }
 
-    public static func clientArgs(for chain: [String]) -> [String] {
+    public nonisolated static func clientArgs(for chain: [String]) -> [String] {
         ["--extractor-args", "youtube:player_client=\(chain.joined(separator: ","))"]
     }
 
     // MARK: - Shared network hardening (probe + download)
 
-    public static var networkArgs: [String] {
+    public nonisolated static var networkArgs: [String] {
         [
             "--socket-timeout", "15",
             "--retries", "2",

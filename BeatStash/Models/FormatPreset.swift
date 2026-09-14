@@ -13,7 +13,7 @@ public enum AudioFormat: String, CaseIterable, Codable, Sendable, Identifiable {
     public var id: String { rawValue }
 
     /// yt-dlp `--audio-format` value.
-    public var ytDlpValue: String {
+    public nonisolated var ytDlpValue: String {
         switch self {
         case .opus: return "opus"
         case .m4a: return "m4a"
@@ -23,7 +23,7 @@ public enum AudioFormat: String, CaseIterable, Codable, Sendable, Identifiable {
         }
     }
 
-    public var displayName: String {
+    public nonisolated var displayName: String {
         switch self {
         case .opus: return "Opus (true best)"
         case .m4a: return "M4A"
@@ -33,7 +33,7 @@ public enum AudioFormat: String, CaseIterable, Codable, Sendable, Identifiable {
         }
     }
 
-    public var fileExtension: String {
+    public nonisolated var fileExtension: String {
         switch self {
         case .opus: return "opus"
         case .m4a: return "m4a"
@@ -44,7 +44,7 @@ public enum AudioFormat: String, CaseIterable, Codable, Sendable, Identifiable {
     }
 
     /// Approximate MB per minute, for batch size estimates.
-    public var mbPerMinute: Double {
+    public nonisolated var mbPerMinute: Double {
         switch self {
         case .opus: return 1.2
         case .m4a: return 1.5
@@ -54,11 +54,11 @@ public enum AudioFormat: String, CaseIterable, Codable, Sendable, Identifiable {
         }
     }
 
-    public var isLosslessContainer: Bool {
+    public nonisolated var isLosslessContainer: Bool {
         self == .flac || self == .wav
     }
 
-    public var footnote: String? {
+    public nonisolated var footnote: String? {
         switch self {
         case .wav:
             return "WAV is DAW-ready but large (~10 MB/min). Source is still YouTube-quality."
@@ -77,7 +77,7 @@ public enum VideoQuality: String, CaseIterable, Codable, Sendable, Identifiable 
 
     public var id: String { rawValue }
 
-    public var displayName: String {
+    public nonisolated var displayName: String {
         switch self {
         case .hd1080p: return "1080p MP4"
         case .uhd4k: return "4K MP4"
@@ -85,7 +85,7 @@ public enum VideoQuality: String, CaseIterable, Codable, Sendable, Identifiable 
     }
 
     /// Max height for `bv*[height<=H]` selector.
-    public var maxHeight: Int {
+    public nonisolated var maxHeight: Int {
         switch self {
         case .hd1080p: return 1080
         case .uhd4k: return 2160

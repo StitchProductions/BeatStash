@@ -5,6 +5,7 @@ enum SidebarDestination: String, Hashable, CaseIterable {
     case newBatch
     case queue
     case history
+    case spotify
     case settings
 
     var title: String {
@@ -12,6 +13,7 @@ enum SidebarDestination: String, Hashable, CaseIterable {
         case .newBatch: return "New Batch"
         case .queue: return "Queue"
         case .history: return "History"
+        case .spotify: return "Spotify"
         case .settings: return "Settings"
         }
     }
@@ -21,6 +23,7 @@ enum SidebarDestination: String, Hashable, CaseIterable {
         case .newBatch: return "plus.circle"
         case .queue: return "arrow.down.circle"
         case .history: return "clock"
+        case .spotify: return "music.note.list"
         case .settings: return "gearshape"
         }
     }
@@ -44,6 +47,8 @@ struct ContentView: View {
                         QueueView()
                     case .history:
                         HistoryView()
+                    case .spotify:
+                        SpotifyView()
                     case .settings:
                         SettingsView()
                     }
@@ -57,6 +62,9 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .beatStashShowQueue)) { _ in
             selection = .queue
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .beatStashShowNewBatch)) { _ in
+            selection = .newBatch
         }
         .sheet(isPresented: $store.showingTerms) {
             TermsView()
@@ -140,5 +148,6 @@ struct ContentView_Previews: PreviewProvider {
     static var previews: some View {
         ContentView()
             .environment(DownloadStore())
+            .environment(SpotifyImportStore())
     }
 }

@@ -63,20 +63,30 @@ struct QueueRowView: View {
                     Text(job.kind == .audio ? job.audioFormat.displayName : job.videoQuality.displayName)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if store.preparingIDs.contains(job.id), job.status == .downloading {
+                        Text("Preparing…").font(.caption).foregroundStyle(.secondary)
+                    }
                     if let s = job.speedString, job.status == .downloading {
                         Text(s).font(.caption).foregroundStyle(.secondary)
                     }
                     if let e = job.etaString, job.status == .downloading {
                         Text("ETA \(e)").font(.caption).foregroundStyle(.secondary)
                     }
-                    if let err = job.errorMessage, job.status == .failed {
-                        Text(err).font(.caption).foregroundStyle(.red).lineLimit(2)
+                    if let err = job.errorMessage,
+                       job.status == .failed || job.status == .queued {
+                        Text(err).font(.caption).foregroundStyle(job.status == .failed ? .red : .secondary).lineLimit(2)
                     }
                 }
                 if job.status.isActive {
-                    ProgressView(value: job.progress)
-                        .progressViewStyle(.linear)
-                        .frame(maxWidth: 320)
+                    if store.preparingIDs.contains(job.id) {
+                        ProgressView()
+                            .progressViewStyle(.linear)
+                            .frame(maxWidth: 320)
+                    } else {
+                        ProgressView(value: job.progress)
+                            .progressViewStyle(.linear)
+                            .frame(maxWidth: 320)
+                    }
                 } else if job.status == .completed {
                     Text("Saved: \(job.outputPath ?? "")")
                         .font(.caption)

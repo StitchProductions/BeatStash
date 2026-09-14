@@ -17,6 +17,11 @@ public struct MediaInfo: Codable, Sendable {
     /// `_type`: "video" | "playlist" | "compat_list"
     public var type: String?
 
+    /// Format list (only when the dump includes it). All-optional: SABR-gated
+    /// dumps omit URLs, flat entries omit formats entirely — absence means
+    /// "unknown", never an error.
+    public var formats: [ProbeFormat]?
+
     public var isPlaylist: Bool {
         type == "playlist" || type == "compat_list"
     }
@@ -39,12 +44,24 @@ public struct MediaInfo: Codable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, uploader, channel, duration, thumbnail
+        case id, title, uploader, channel, duration, thumbnail, formats
         case webpageURL = "webpage_url"
         case uploadDate = "upload_date"
         case playlistTitle = "playlist_title"
         case playlistIndex = "playlist_index"
         case type = "_type"
+    }
+}
+
+/// One format entry. Deliberately minimal: only what download planning needs
+/// (a usable stream URL). Everything optional for SABR-era dumps.
+public struct ProbeFormat: Codable, Sendable {
+    public var formatID: String?
+    public var url: String?
+
+    enum CodingKeys: String, CodingKey {
+        case formatID = "format_id"
+        case url
     }
 }
 
@@ -83,7 +100,51 @@ public struct PlaylistEntry: Codable, Sendable, Identifiable {
 }
 
 /// Result of probing a URL: single video or playlist.
-public enum ProbeResult: Sendable {
+public enum ProbeResult: Sendable, Codable {
     case single(MediaInfo)
     case playlist(title: String?, entries: [PlaylistEntry])
+
+    private enum Kind: String, Codable { case single, playlist }
+    private enum Keys: String, CodingKey { case kind, title, media, entries }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: Keys.self)
+        switch try c.decode(Kind.self, forKey: .kind) {
+        case .single:
+            self = .single(try c.decode(MediaInfo.self, forKey: .media))
+        case .playlist:
+            self = .playlist(
+                title: try c.decodeIfPresent(String.self, forKey: .title),
+                entries: try c.decode([PlaylistEntry].self, forKey: .entries))
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: Keys.self)
+        switch self {
+        case .single(let media):
+            try c.encode(Kind.single, forKey: .kind)
+            try c.encode(media, forKey: .media)
+        case .playlist(let title, let entries):
+            try c.encode(Kind.playlist, forKey: .kind)
+            try c.encodeIfPresent(title, forKey: .title)
+            try c.encode(entries, forKey: .entries)
+        }
+    }
+}
+
+/// Minimal `youtube.com/oembed` response — the instant metadata tier.
+/// Official endpoint, no auth, ~0.15s. No duration/date: those backfill.
+public struct OEmbedVideo: Decodable, Sendable {
+    public var title: String
+    public var authorName: String
+    public var thumbnailURL: String?
+    public var authorURL: String?
+
+    enum CodingKeys: String, CodingKey {
+        case title
+        case authorName = "author_name"
+        case thumbnailURL = "thumbnail_url"
+        case authorURL = "author_url"
+    }
 }

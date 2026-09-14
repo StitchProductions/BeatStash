@@ -5,16 +5,17 @@ import Foundation
 public enum TagParser: Sendable {
     // Suffixes that add noise, not identity. `feat.` is deliberately kept.
     // Precompiled once — stripNoise() runs per track (100s per playlist).
-    private static let noiseRegexes: [NSRegularExpression] = [
+    // Immutable after first use: safe from any isolation.
+    nonisolated private static let noiseRegexes: [NSRegularExpression] = [
         #"\s*[\(\[]\s*official\s*(music\s*)?(video|audio|visualizer|lyric(s)?|mv)?\s*[\)\]]"#,
         #"\s*[\(\[]\s*(official\s*)?(lyric(s)?\s*(video|visualizer)?|audio|visualizer|music\s*video|m/?v)\s*[\)\]]"#,
         #"\s*[\(\[]\s*(HD|4K|HQ)\s*[\)\]]"#,
         #"\s+-\s*(HD|4K|HQ)\s*$"#,
     ].compactMap { try? NSRegularExpression(pattern: $0, options: [.caseInsensitive]) }
 
-    private static let separators = [" - ", " – ", " — ", " –", " —", " : "]
+    nonisolated private static let separators = [" - ", " – ", " — ", " –", " —", " : "]
 
-    public static func parse(
+    public nonisolated static func parse(
         title: String,
         uploader: String?,
         playlistTitle: String? = nil,
@@ -66,7 +67,7 @@ public enum TagParser: Sendable {
 
     // MARK: - Helpers
 
-    public static func stripNoise(_ s: String) -> String {
+    public nonisolated static func stripNoise(_ s: String) -> String {
         var out = s
         for re in noiseRegexes {
             out = re.stringByReplacingMatches(
@@ -81,7 +82,7 @@ public enum TagParser: Sendable {
     }
 
     /// "LoyleCarnerVEVO" → "LoyleCarner", "Adele - Topic" → "Adele".
-    public static func cleanUploader(_ uploader: String) -> String {
+    public nonisolated static func cleanUploader(_ uploader: String) -> String {
         var u = uploader.trimmingCharacters(in: .whitespaces)
         if u.hasSuffix("VEVO") { u = String(u.dropLast(4)) }
         if let range = u.range(of: " - Topic", options: .caseInsensitive) {

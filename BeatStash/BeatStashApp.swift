@@ -3,11 +3,13 @@ import SwiftUI
 @main
 struct BeatStashApp: App {
     @State private var store = DownloadStore()
+    @State private var spotifyStore = SpotifyImportStore()
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environment(store)
+                .environment(spotifyStore)
                 .frame(minWidth: 900, minHeight: 600)
         }
         .windowToolbarStyle(.unified)
@@ -30,4 +32,5 @@ struct BeatStashApp: App {
 extension Notification.Name {
     static let beatStashPasteFetch = Notification.Name("beatStashPasteFetch")
     static let beatStashShowQueue = Notification.Name("beatStashShowQueue")
+    static let beatStashShowNewBatch = Notification.Name("beatStashShowNewBatch")
 }

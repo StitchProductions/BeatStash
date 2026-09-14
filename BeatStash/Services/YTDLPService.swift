@@ -1,5 +1,13 @@
 import Foundation
 import os
+import CryptoKit
+
+/// Filename-safe content hash (artwork cache keys).
+enum SHA256Hex {
+    nonisolated static func digest(_ s: String) -> String {
+        SHA256.hash(data: Data(s.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+}
 
 /// Thin `Process` wrapper around `yt-dlp` + `ffmpeg` tagging.
 /// `yt-dlp --dump-json` is the source of truth — formats are never hardcoded
@@ -36,9 +44,10 @@ public actor YTDLPService: Sendable {
         subsystem: "StitchProductions.BeatStash", category: "probes")
 
     /// Session probe cache: Fetch-info and Download share results so the same
-    /// URL is never probed twice within the TTL.
+    /// URL is never probed twice within the TTL. `raw` is the exact dump line
+    /// (singles only) for `--load-info-json`, skipping re-extraction at download.
     static let probeCacheTTL: TimeInterval = 600
-    private var probeCache: [String: (result: ProbeResult, at: Date)] = [:]
+    private var probeCache: [String: (result: ProbeResult, raw: String?, at: Date)] = [:]
 
     /// Drops cached probes for `url` (call after a failed download retry, etc.).
     public func dropProbeCache(for url: String) {
@@ -49,9 +58,103 @@ public actor YTDLPService: Sendable {
         url.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func cacheProbe(key: String, result: ProbeResult) {
+    private func cacheProbe(key: String, result: ProbeResult, raw: String? = nil) {
         if probeCache.count > 64 { probeCache.removeAll() }
-        probeCache[key] = (result, Date())
+        probeCache[key] = (result, raw, Date())
+    }
+
+    // MARK: - Instant tier (oEmbed) + persistent probe cache
+
+    /// oEmbed endpoint for a page URL. Pure (testable): all smarts are in the caller.
+    /// Returns nil for non-URL input so garbage never becomes a request.
+    nonisolated static func oEmbedURL(for pageURL: String) -> URL? {
+        guard let page = URL(string: pageURL), page.scheme?.hasPrefix("http") == true else {
+            return nil
+        }
+        var c = URLComponents(string: "https://www.youtube.com/oembed")
+        c?.queryItems = [
+            URLQueryItem(name: "url", value: page.absoluteString),
+            URLQueryItem(name: "format", value: "json"),
+        ]
+        return c?.url
+    }
+
+    /// One tiny request (~0.15s): title/author/thumbnail, no duration or date.
+    /// Throws on non-200 (age-gated/private/deleted) and offline — callers
+    /// treat any failure as "fall through to the full probe".
+    public func fetchOEmbed(url: String) async throws -> OEmbedVideo {
+        guard let endpoint = Self.oEmbedURL(for: url) else {
+            throw ServiceError.parseFailed("bad URL")
+        }
+        let (data, response) = try await URLSession.shared.data(
+            for: URLRequest(url: endpoint, timeoutInterval: 10))
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            throw ServiceError.parseFailed("oEmbed status \(code)")
+        }
+        return try await MainActor.run {
+            try JSONDecoder().decode(OEmbedVideo.self, from: data)
+        }
+    }
+
+    /// On-disk probe results (7-day TTL, capped). Repeat pastes — even across
+    /// launches — resolve instantly with full data, no network at all.
+    static let diskCacheTTL: TimeInterval = 7 * 24 * 3600
+    static let diskCacheCap = 500
+    private struct DiskProbeEntry: Codable {
+        var at: Date
+        var result: ProbeResult
+    }
+    private var diskCache: [String: DiskProbeEntry]?
+
+    /// Test seam: redirect the cache file (headless + Xcode tests).
+    @MainActor static var diskCacheFileOverride: URL?
+    @MainActor private static func diskCacheFile() -> URL {
+        diskCacheFileOverride ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("BeatStash/probe-cache.json", isDirectory: false)
+    }
+
+    /// Reads + prunes the disk cache. MainActor: the Codable conformance lives there.
+    @MainActor private static func readDiskCacheFile() -> [String: DiskProbeEntry] {
+        guard let data = try? Data(contentsOf: diskCacheFile()) else { return [:] }
+        guard var cache = try? JSONDecoder().decode([String: DiskProbeEntry].self, from: data) else { return [:] }
+        cache = cache.filter { Date().timeIntervalSince($0.value.at) < diskCacheTTL }
+        return cache
+    }
+
+    /// Prunes (TTL + cap) and persists. MainActor: Encodable lives there.
+    @MainActor private static func writeDiskCacheFile(_ cache: [String: DiskProbeEntry]) {
+        var pruned = cache.filter { Date().timeIntervalSince($0.value.at) < diskCacheTTL }
+        if pruned.count > diskCacheCap {
+            let newest = pruned.sorted { $0.value.at > $1.value.at }.prefix(diskCacheCap)
+            pruned = Dictionary(uniqueKeysWithValues: newest.map { ($0.key, $0.value) })
+        }
+        try? FileManager.default.createDirectory(
+            at: diskCacheFile().deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let data = try? JSONEncoder().encode(pruned) {
+            try? data.write(to: diskCacheFile(), options: .atomic)
+        }
+    }
+
+    /// Full-data hit from a previous fetch, or nil (miss/expired).
+    public func diskCachedProbe(for url: String) async -> ProbeResult? {
+        if diskCache == nil {
+            diskCache = await Self.readDiskCacheFile()
+        }
+        let key = Self.probeCacheKey(url)
+        guard let e = diskCache?[key],
+              Date().timeIntervalSince(e.at) < Self.diskCacheTTL else { return nil }
+        return e.result
+    }
+
+    /// Warms the session cache and persists to disk. Callers are async already.
+    private func cacheProbePersisting(key: String, result: ProbeResult, raw: String? = nil) async {
+        cacheProbe(key: key, result: result, raw: raw)
+        if diskCache == nil {
+            diskCache = await Self.readDiskCacheFile()
+        }
+        diskCache?[key] = DiskProbeEntry(at: Date(), result: result)
+        await Self.writeDiskCacheFile(diskCache ?? [:])
     }
 
     public init(binaries: BinaryManager = .shared) {
@@ -92,7 +195,7 @@ public actor YTDLPService: Sendable {
                             title = await playlistTitle(url: url, auth: auth, chain: chain)
                         }
                         let result = ProbeResult.playlist(title: title, entries: entries)
-                        self.cacheProbe(key: key, result: result)
+                        await self.cacheProbePersisting(key: key, result: result)
                         Self.log.info("probe playlist: \(entries.count, privacy: .public) entries, chain \(i, privacy: .public), \(String(format: "%.1f", Date().timeIntervalSince(start)), privacy: .public)s: \(key, privacy: .public)")
                         return result
                     }
@@ -115,12 +218,12 @@ public actor YTDLPService: Sendable {
         for (i, chain) in chains.enumerated() {
             try Task.checkCancellation()
             do {
-                let media = try await dumpSingle(
+                let found = try await dumpSingle(
                     url: url, auth: auth, chain: chain,
                     timeout: i == 0 ? Self.probeTimeoutFirst : Self.probeTimeoutFallback
                 )
-                let result = ProbeResult.single(media)
-                self.cacheProbe(key: key, result: result)
+                let result = ProbeResult.single(found.media)
+                await self.cacheProbePersisting(key: key, result: result, raw: found.raw)
                 Self.log.info("probe single: chain \(i, privacy: .public), \(String(format: "%.1f", Date().timeIntervalSince(start)), privacy: .public)s: \(key, privacy: .public)")
                 return result
             } catch is CancellationError {
@@ -140,9 +243,56 @@ public actor YTDLPService: Sendable {
 
     // MARK: - Probe helpers
 
-    public static func isListURL(_ url: String) -> Bool {
+    public nonisolated static func isListURL(_ url: String) -> Bool {
         let lower = url.lowercased()
         return lower.contains("list=") || lower.contains("/playlist")
+    }
+
+    /// Search-retry policy: bot-wall and network classes clear by themselves;
+    /// everything else fails the track immediately. Pure (tested).
+    nonisolated static func isSearchRetryable(_ error: Error) -> Bool {
+        guard let e = error as? ServiceError else { return false }
+        switch e {
+        case .botCheck, .networkError, .probeTimeout:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// YouTube search for import matching: flat `ytsearchN:` results with
+    /// id/title/duration/uploader (no formats, no player dance beyond the
+    /// standard hardening). Serial callers only — search throttles like
+    /// extractions (measured 3-parallel slower than serial).
+    ///
+    /// Bot-wall (403) and network failures retry with backoff (5s, 15s);
+    /// anything else throws immediately. Callers add inter-search pacing.
+    public func searchYouTube(query: String, limit: Int = 5) async throws -> [PlaylistEntry] {
+        guard let ytDlp = await binaries.ytDlpPath else { throw ServiceError.missingBinary }
+        try Task.checkCancellation()
+        let args = YouTubeAuth.networkArgs
+            + ["--flat-playlist", "--dump-json", "--no-warnings",
+               "ytsearch\(max(1, min(limit, 10))):\(query)"]
+        var lastError: Error = ServiceError.downloadFailed("search failed")
+        for attempt in 0...2 {
+            if attempt > 0 {
+                try Task.checkCancellation()
+                Self.log.info("search retry \(attempt, privacy: .public)/2 after backoff: \(query.prefix(40), privacy: .public)")
+                try await Task.sleep(nanoseconds: UInt64([5, 15][attempt - 1]) * 1_000_000_000)
+            }
+            do {
+                let out = try await runCapture(exe: ytDlp, args: args, timeout: 45)
+                guard out.exitCode == 0 else { throw Self.classifyProbeError(stderr: out.stderr) }
+                return await Self.parseFlatEntries(from: out.stdout) ?? []
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                lastError = error
+                if Self.isSearchRetryable(error), attempt < 2 { continue }
+                throw error
+            }
+        }
+        throw lastError
     }
 
     /// Returns entries for playlists, `nil` for single videos.
@@ -163,7 +313,13 @@ public actor YTDLPService: Sendable {
             throw e
         }
         guard out.exitCode == 0 else { throw Self.classifyProbeError(stderr: out.stderr) }
-        let lines = out.stdout.components(separatedBy: .newlines)
+        return await Self.parseFlatEntries(from: out.stdout)
+    }
+
+    /// Line-delimited flat JSON → indexed entries, or `nil` for singles.
+    /// MainActor: the `PlaylistEntry` Decodable conformance lives there.
+    @MainActor static func parseFlatEntries(from stdout: String) -> [PlaylistEntry]? {
+        let lines = stdout.components(separatedBy: .newlines)
             .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
         guard !lines.isEmpty else { return nil }
         let decoder = JSONDecoder()
@@ -206,7 +362,7 @@ public actor YTDLPService: Sendable {
 
     private func dumpSingle(
         url: String, auth: YouTubeAuth, chain: [String], timeout: TimeInterval
-    ) async throws -> MediaInfo {
+    ) async throws -> (media: MediaInfo, raw: String) {
         guard let ytDlp = await binaries.ytDlpPath else { throw ServiceError.missingBinary }
         let t0 = Date()
         defer {
@@ -222,14 +378,21 @@ public actor YTDLPService: Sendable {
         }
         guard out.exitCode == 0 else { throw Self.classifyProbeError(stderr: out.stderr) }
         // yt-dlp may emit warnings above the JSON on stdout; scan for the object.
-        if let media = Self.decodeMedia(from: out.stdout) { return media }
+        if let found = await Self.decodeMediaWithRaw(from: out.stdout) { return found }
         throw Self.classifyProbeError(stderr: out.stderr, fallback: ServiceError.parseFailed(
             out.stderr.isEmpty ? "empty response from yt-dlp" : String(out.stderr.suffix(600))
         ))
     }
 
     /// Tolerates leading non-JSON lines: decodes the first line that parses.
-    static func decodeMedia(from stdout: String) -> MediaInfo? {
+    /// MainActor: `MediaInfo`'s Codable conformance lives there with the model.
+    @MainActor static func decodeMedia(from stdout: String) -> MediaInfo? {
+        decodeMediaWithRaw(from: stdout)?.media
+    }
+
+    /// Decode plus the exact JSON line that parsed (for `--load-info-json`,
+    /// which needs pure JSON — warning lines would choke it).
+    @MainActor static func decodeMediaWithRaw(from stdout: String) -> (media: MediaInfo, raw: String)? {
         let decoder = JSONDecoder()
         // Most common: single JSON object (possibly multi-line? no — one line).
         for line in stdout.components(separatedBy: .newlines).reversed() {
@@ -237,7 +400,7 @@ public actor YTDLPService: Sendable {
             guard t.hasPrefix("{") else { continue }
             if let data = t.data(using: .utf8),
                let media = try? decoder.decode(MediaInfo.self, from: data) {
-                return media
+                return (media, t)
             }
         }
         // Fallback: whole blob (handles pretty-printed JSON).
@@ -245,7 +408,7 @@ public actor YTDLPService: Sendable {
         if trimmed.hasPrefix("{"),
            let data = trimmed.data(using: .utf8),
            let media = try? decoder.decode(MediaInfo.self, from: data) {
-            return media
+            return (media, trimmed)
         }
         return nil
     }
@@ -254,7 +417,7 @@ public actor YTDLPService: Sendable {
 
     /// Hard per-client failures worth retrying on the next chain.
     /// Auth-gated results that will fail identically everywhere are thrown immediately.
-    static func isRetryableProbeError(_ error: Error) -> Bool {
+    nonisolated static func isRetryableProbeError(_ error: Error) -> Bool {
         guard let e = error as? ServiceError else { return false } // unknown → retry once per chain
         switch e {
         case .probeTimeout, .clientFailed, .reloadRequired, .formatGated, .networkError, .downloadFailed:
@@ -264,11 +427,16 @@ public actor YTDLPService: Sendable {
         }
     }
 
-    static func classifyProbeError(stderr: String, fallback: ServiceError? = nil) -> ServiceError {
+    nonisolated static func classifyProbeError(stderr: String, fallback: ServiceError? = nil) -> ServiceError {
         let lower = stderr.lowercased()
         let tail = String(stderr.suffix(800)).trimmingCharacters(in: .whitespacesAndNewlines)
         let msg = tail.isEmpty ? stderr : tail
         if lower.contains("sign in to confirm you") || lower.contains("not a bot") {
+            return .botCheck(msg)
+        }
+        // Search/API-surface throttling presents as API-page 403s.
+        if lower.contains("unable to download api page")
+            && (lower.contains("403") || lower.contains("forbidden")) {
             return .botCheck(msg)
         }
         if lower.contains("login required") || lower.contains("log in") || lower.contains("private video") {
@@ -290,6 +458,34 @@ public actor YTDLPService: Sendable {
         }
         if let fb = fallback { return fb }
         return .downloadFailed(msg.isEmpty ? "yt-dlp failed with no message" : msg)
+    }
+
+    /// Download-time chain policy: transient rejections may pass on the next
+    /// client; auth-gated failures fail identically everywhere. Pure (tested).
+    nonisolated static func shouldRetryDownloadChain(error: Error, attemptsLeft: Int) -> Bool {
+        guard attemptsLeft > 0 else { return false }
+        guard let e = error as? ServiceError else { return true } // unknown → one more chain
+        switch e {
+        case .reloadRequired, .networkError, .formatGated, .botCheck,
+             .probeTimeout, .clientFailed, .downloadFailed:
+            return true
+        case .loginRequired, .videoUnavailable, .parseFailed, .missingBinary, .outputNotFound:
+            return false
+        }
+    }
+
+    /// Store-level auto-requeue policy: only failures that clear by themselves
+    /// (reloaded player session, healed network) earn silent retries, capped
+    /// so a hard failure still surfaces. Pure (tested).
+    nonisolated static func shouldAutoRequeue(error: Error, attemptsUsed: Int) -> Bool {
+        guard attemptsUsed < 2 else { return false }
+        guard let e = error as? ServiceError else { return false }
+        switch e {
+        case .reloadRequired, .networkError:
+            return true
+        default:
+            return false
+        }
     }
 
     // MARK: - Download
@@ -319,7 +515,9 @@ public actor YTDLPService: Sendable {
                     // Tag pass (ffmpeg). Best-effort: don't fail DL if tagging fails,
                     // surface via error only if file missing.
                     if job.kind == .audio {
-                        try? await self.applyTags(to: file, tags: job.tags, format: job.audioFormat)
+                        try? await self.applyTags(to: file, tags: job.tags,
+                                                  format: job.audioFormat,
+                                                  artworkURL: job.artworkURL)
                     }
                     continuation.finish()
                 } catch {
@@ -329,17 +527,96 @@ public actor YTDLPService: Sendable {
         }
     }
 
-    /// Actual process run (isolated so `active` bookkeeping is safe).
+    /// Usable stream URLs in a dump. SABR-gated dumps omit them — those must
+    /// re-extract at download time instead of reusing the cached dump.
+    /// Pure (testable): only touches the passed value.
+    nonisolated static func usableFormatURLs(in media: MediaInfo) -> [String] {
+        (media.formats ?? []).compactMap(\.url).filter { $0.hasPrefix("https://") }
+    }
+
+    /// Stages a `--load-info-json` file for this job when the session probe
+    /// left a fresh, usable dump: single-video jobs only, entry younger than
+    /// the session TTL (far inside stream-URL expiry), with real stream URLs.
+    /// Returns the temp path, or nil to extract normally. Caller deletes it.
+    private func prepareLoadInfoFile(job: DownloadJob) -> String? {
+        guard job.playlistTitle == nil,
+              let entry = probeCache[Self.probeCacheKey(job.url)],
+              let raw = entry.raw,
+              Date().timeIntervalSince(entry.at) < Self.probeCacheTTL,
+              case .single(let media) = entry.result,
+              !Self.usableFormatURLs(in: media).isEmpty
+        else { return nil }
+        let dest = FileManager.default.temporaryDirectory
+            .appendingPathComponent("beatstash-info-\(job.id.uuidString).json")
+        do {
+            try raw.write(to: dest, atomically: true, encoding: .utf8)
+            return dest.path
+        } catch {
+            return nil
+        }
+    }
+
+    /// Download with client fallback: transient rejections (stale player
+    /// session, throttled/gated formats) retry on the next chain while
+    /// auth-gated failures fail fast. Retries resume `.part` files through
+    /// the shared -P/-o template instead of restarting.
     private func runDownload(
         job: DownloadJob,
         to directory: URL,
         onProgress: @Sendable @escaping (ProgressUpdate) -> Void
     ) async throws -> URL {
-        guard let ytDlp = await binaries.ytDlpPath else { throw ServiceError.missingBinary }
+        guard await binaries.ytDlpPath != nil else { throw ServiceError.missingBinary }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
         let auth = YouTubeAuth.load()
-        let args = buildArguments(job: job, directory: directory, auth: auth)
+        let chains = auth.clientChains()
+        var lastError: Error = ServiceError.downloadFailed("yt-dlp failed with no message")
+        for (i, chain) in chains.enumerated() {
+            try Task.checkCancellation()
+            do {
+                // Fresh cached dump only on the first attempt; retries
+                // re-extract (the dump's URLs may be exactly what's stale).
+                return try await runDownloadAttempt(
+                    job: job, to: directory, auth: auth, chain: chain,
+                    useLoadInfo: i == 0, onProgress: onProgress)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                lastError = error
+                if Self.shouldRetryDownloadChain(error: error, attemptsLeft: chains.count - 1 - i) {
+                    Self.log.info("download chain \(i, privacy: .public) failed, trying next: \(job.url, privacy: .public)")
+                    continue
+                }
+                throw error
+            }
+        }
+        throw lastError
+    }
+
+    /// One process run for a single client chain (isolated so `active`
+    /// bookkeeping is safe).
+    private func runDownloadAttempt(
+        job: DownloadJob,
+        to directory: URL,
+        auth: YouTubeAuth,
+        chain: [String],
+        useLoadInfo: Bool,
+        onProgress: @Sendable @escaping (ProgressUpdate) -> Void
+    ) async throws -> URL {
+        guard let ytDlp = await binaries.ytDlpPath else { throw ServiceError.missingBinary }
+        var args = await buildArguments(job: job, directory: directory, auth: auth, chain: chain)
+        // Skip re-extraction when the session probe left a fresh, usable dump:
+        // no player-API roundtrips at download start (and no throttle pileup
+        // across concurrent jobs). Falls back silently when ineligible.
+        let loadInfoPath = useLoadInfo ? prepareLoadInfoFile(job: job) : nil
+        if let loadInfoPath {
+            args += ["--load-info-json", loadInfoPath]
+        }
+        defer {
+            if let loadInfoPath {
+                try? FileManager.default.removeItem(atPath: loadInfoPath)
+            }
+        }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: ytDlp)
         process.arguments = args
@@ -382,8 +659,12 @@ public actor YTDLPService: Sendable {
                     }
                 } else {
                     let errData = (try? errPipe.fileHandleForReading.readToEnd()) ?? Data()
-                    let msg = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-                    gate.resume(throwing: ServiceError.downloadFailed(msg?.isEmpty == false ? msg! : "yt-dlp exited with code \(proc.terminationStatus)"))
+                    let msg = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    // Classify so chain fallback + messages understand the failure;
+                    // keep the exit code when yt-dlp said nothing at all.
+                    let fallback: ServiceError? = msg.isEmpty
+                        ? .downloadFailed("yt-dlp exited with code \(proc.terminationStatus)") : nil
+                    gate.resume(throwing: Self.classifyProbeError(stderr: msg, fallback: fallback))
                 }
             }
 
@@ -406,11 +687,21 @@ public actor YTDLPService: Sendable {
 
     // MARK: - Argument builders (public for testing / preview)
 
-    public func buildArguments(job: DownloadJob, directory: URL) -> [String] {
-        buildArguments(job: job, directory: directory, auth: YouTubeAuth.load())
+    public func buildArguments(job: DownloadJob, directory: URL) async -> [String] {
+        await buildArguments(job: job, directory: directory, auth: YouTubeAuth.load())
     }
 
-    func buildArguments(job: DownloadJob, directory: URL, auth: YouTubeAuth) -> [String] {
+    /// `--ffmpeg-location` for a resolved ffmpeg path (pure, testable).
+    /// Directory form covers both ffmpeg and ffprobe. Empty when unknown —
+    /// yt-dlp then falls back to PATH (today's behavior).
+    nonisolated static func ffmpegLocationArgs(ffmpegPath: String?) -> [String] {
+        guard let ffmpegPath, !ffmpegPath.isEmpty else { return [] }
+        let dir = URL(fileURLWithPath: ffmpegPath).deletingLastPathComponent().path
+        guard !dir.isEmpty else { return [] }
+        return ["--ffmpeg-location", dir]
+    }
+
+    func buildArguments(job: DownloadJob, directory: URL, auth: YouTubeAuth, chain: [String]? = nil) async -> [String] {
         var args: [String] = [
             "--no-playlist",
             "--ignore-errors",
@@ -421,9 +712,13 @@ public actor YTDLPService: Sendable {
         ]
         args += YouTubeAuth.networkArgs
         args += auth.authArgs()
-        // Download on the anonymous-first chain; cookies (if any) ride along.
-        // PO-token plugin flags are appended when a runtime + plugins exist.
-        if let chain = auth.clientChains().first {
+        // Point postprocessing at the resolved ffmpeg (bundled or custom).
+        // Without this the child inherits the GUI app's minimal PATH and every
+        // `-x` / thumbnail / merge step fails with "ffmpeg not found".
+        args += Self.ffmpegLocationArgs(ffmpegPath: await binaries.ffmpegPath)
+        // Download on the given chain (first = anonymous-first); cookies (if any)
+        // ride along. PO-token plugin flags are appended when a runtime + plugins exist.
+        if let chain = chain ?? auth.clientChains().first {
             args += YouTubeAuth.clientArgs(for: chain)
         }
         args += pluginArgs()
@@ -451,10 +746,15 @@ public actor YTDLPService: Sendable {
     }
 
     /// Shared probe prefix: hardening + auth + client + optional POT plugin.
-    static func probeBaseArgs(auth: YouTubeAuth, chain: [String]) -> [String] {
+    /// `--ignore-no-formats-error` guarantees the metadata-intact contract:
+    /// a SABR/format-gated video succeeds on the first chain with its title
+    /// etc. instead of burning every fallback chain. Probe-only — downloads
+    /// must still fail loudly when no usable format exists.
+    nonisolated static func probeBaseArgs(auth: YouTubeAuth, chain: [String]) -> [String] {
         var args = YouTubeAuth.networkArgs
         args += auth.authArgs()
         args += YouTubeAuth.clientArgs(for: chain)
+        args += ["--ignore-no-formats-error"]
         return args
     }
 
@@ -506,12 +806,16 @@ public actor YTDLPService: Sendable {
 
     // MARK: - Tagging (ffmpeg post-pass)
 
-    /// Overwrites metadata in place via temp file. Best-effort per format.
-    /// WAV: only INFO + BWF chunks are writable — Finder/Music may ignore them (spec limit).
-    public func applyTags(to file: URL, tags: TrackTags, format: AudioFormat) async throws {
-        guard let ffmpeg = await binaries.ffmpegPath else { return } // no ffmpeg → keep untagged file
-        let tmp = file.deletingLastPathComponent().appendingPathComponent(".\(file.deletingPathExtension().lastPathComponent).tagged.\(file.pathExtension)")
-        var args = ["-y", "-i", file.path]
+    /// Output-side ffmpeg args for the tag rewrite: text metadata always,
+    /// cover art when `artPath` is set (audio streams re-mapped, so a
+    /// YouTube thumbnail embedded at download time is *replaced*, not doubled).
+    /// WAV takes text only (cover support is spec-poor). Pure (tested).
+    nonisolated static func tagOutputArgs(tags: TrackTags, format: AudioFormat, artPath: String?) -> [String] {
+        var args: [String] = []
+        if artPath != nil, format != .wav {
+            args += ["-map", "0:a", "-map", "1", "-c", "copy",
+                     "-disposition:v", "attached_pic"]
+        }
         args += ["-metadata", "artist=\(tags.artist)"]
         args += ["-metadata", "title=\(tags.title)"]
         args += ["-metadata", "album=\(tags.album)"]
@@ -519,13 +823,80 @@ public actor YTDLPService: Sendable {
         if let y = tags.year, !y.isEmpty { args += ["-metadata", "date=\(y)"] }
         if let g = tags.genre, !g.isEmpty { args += ["-metadata", "genre=\(g)"] }
         if format == .mp3 {
-            args += ["-id3v2_version", "3", "-write_id3v1", "1", "-c", "copy", tmp.path]
+            args += ["-id3v2_version", "3", "-write_id3v1", "1"]
         } else if format == .wav {
-            args += ["-c", "copy", "-write_bext", "1", tmp.path]
-        } else {
-            args += ["-c", "copy", tmp.path]
+            args += ["-c", "copy", "-write_bext", "1"]
+            return args
         }
+        if artPath == nil || format == .wav {
+            args += ["-c", "copy"]
+        }
+        return args
+    }
+
+    /// Overwrites metadata in place via temp file. Best-effort per format.
+    /// WAV: only INFO + BWF chunks are writable — Finder/Music may ignore them (spec limit).
+    /// With Spotify artwork: downloaded once, cached, and attached (replacing
+    /// any YouTube thumbnail); failures fall back to text-only tagging.
+    public func applyTags(to file: URL, tags: TrackTags, format: AudioFormat, artworkURL: String? = nil) async throws {
+        guard let ffmpeg = await binaries.ffmpegPath else { return } // no ffmpeg → keep untagged file
+        let tmp = file.deletingLastPathComponent().appendingPathComponent(".\(file.deletingPathExtension().lastPathComponent).tagged.\(file.pathExtension)")
+        var args = ["-y", "-i", file.path]
+        var artPath: String?
+        if let artworkURL, !artworkURL.isEmpty, format != .wav {
+            artPath = await ensureArtwork(url: artworkURL)
+            if let artPath { args += ["-i", artPath] }
+        }
+        args += Self.tagOutputArgs(tags: tags, format: format, artPath: artPath)
+        args.append(tmp.path)
         _ = try? await runCapture(exe: ffmpeg, args: args, timeout: 60)
+    }
+
+    /// Artwork cache cap (files; oldest mtime pruned on write).
+    static let artworkCap = 500
+
+    /// Downloads (if needed) and caches cover art. Returns the local path,
+    /// or nil to fall back to text-only tagging. Images only, <10 MB.
+    public func ensureArtwork(url: String) async -> String? {
+        guard let remote = URL(string: url),
+              remote.scheme?.hasPrefix("http") == true else { return nil }
+        let digest = SHA256Hex.digest(remote.absoluteString)
+        let dest = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("BeatStash/artwork/\(digest).jpg", isDirectory: false)
+        if FileManager.default.isReadableFile(atPath: dest.path) { return dest.path }
+        do {
+            var req = URLRequest(url: remote, timeoutInterval: 20)
+            req.setValue("image/*", forHTTPHeaderField: "Accept")
+            let (data, response) = try await URLSession.shared.data(for: req)
+            guard (response as? HTTPURLResponse)?.statusCode == 200,
+                  data.count > 1_024, data.count < 10_000_000,
+                  let mime = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type"),
+                  mime.hasPrefix("image/")
+            else { return nil }
+            try FileManager.default.createDirectory(
+                at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: dest, options: .atomic)
+            pruneArtworkCache(dir: dest.deletingLastPathComponent())
+            return dest.path
+        } catch {
+            return nil
+        }
+    }
+
+    /// Drops oldest files past the cap. Best-effort, never throws.
+    private func pruneArtworkCache(dir: URL) {
+        guard let items = try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]) else { return }
+        guard items.count > Self.artworkCap else { return }
+        let dated = items.map { url -> (URL, Date) in
+            let d = (try? url.resourceValues(forKeys: [.contentModificationDateKey])
+                .contentModificationDate) ?? .distantPast
+            return (url, d)
+        }.sorted { $0.1 < $1.1 }
+        for (url, _) in dated.prefix(items.count - Self.artworkCap) {
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     // MARK: - Progress parse
@@ -544,7 +915,8 @@ public actor YTDLPService: Sendable {
     }()
 
     /// `[download]  42.3% of ~5.12MiB at 2.10MiB/s ETA 00:02`
-    static func parseProgress(line: String) -> ProgressUpdate? {
+    /// Internal for tests (output contract with the download runner).
+    nonisolated static func parseProgress(line: String) -> ProgressUpdate? {
         guard line.contains("[download]") && line.contains("%") else { return nil }
         // Percent
         let range = NSRange(line.startIndex..., in: line)
@@ -720,34 +1092,38 @@ public actor YTDLPService: Sendable {
 }
 
 /// `Process` is not `Sendable`; box it for actor storage.
+/// `nonisolated(unsafe)` throughout this section: every type here is
+/// lock-guarded (or immutable) by design and must be callable from GCD
+/// blocks, while the project default isolation is MainActor.
 final class ProcessBox: @unchecked Sendable {
     let process: Process
-    init(_ process: Process) { self.process = process }
+    nonisolated init(_ process: Process) { self.process = process }
 }
 
 /// Tracks in-flight probe processes so `cancelProbes()` can kill them.
 /// Lock-guarded (not actor-isolated) because it is driven from GCD blocks.
 final class ProbeRegistry: @unchecked Sendable {
     private let lock = NSLock()
-    private var processes: [UUID: Process] = [:]
-    private var cancelled: Set<UUID> = []
+    nonisolated(unsafe) private var processes: [UUID: Process] = [:]
+    nonisolated(unsafe) private var cancelled: Set<UUID> = []
+    nonisolated init() {}
 
-    func register(id: UUID, process: Process) {
+    nonisolated func register(id: UUID, process: Process) {
         lock.lock(); defer { lock.unlock() }
         processes[id] = process
     }
 
-    func unregister(id: UUID) {
+    nonisolated func unregister(id: UUID) {
         lock.lock(); defer { lock.unlock() }
         processes.removeValue(forKey: id)
     }
 
-    func wasCancelled(id: UUID) -> Bool {
+    nonisolated func wasCancelled(id: UUID) -> Bool {
         lock.lock(); defer { lock.unlock() }
         return cancelled.contains(id)
     }
 
-    func cancelAll() {
+    nonisolated func cancelAll() {
         lock.lock()
         let procs = Array(processes.values)
         for id in processes.keys { cancelled.insert(id) }
@@ -765,12 +1141,12 @@ final class ProbeRegistry: @unchecked Sendable {
 /// Single-resume gate for `CheckedContinuation` across concurrent handlers.
 final class FinishGate: @unchecked Sendable {
     private let lock = NSLock()
-    private var done = false
+    nonisolated(unsafe) private var done = false
     private let cont: CheckedContinuation<URL, Error>
 
-    init(_ cont: CheckedContinuation<URL, Error>) { self.cont = cont }
+    nonisolated init(_ cont: CheckedContinuation<URL, Error>) { self.cont = cont }
 
-    func resume(returning value: URL) {
+    nonisolated func resume(returning value: URL) {
         lock.lock()
         guard !done else { lock.unlock(); return }
         done = true
@@ -778,7 +1154,7 @@ final class FinishGate: @unchecked Sendable {
         cont.resume(returning: value)
     }
 
-    func resume(throwing error: Error) {
+    nonisolated func resume(throwing error: Error) {
         lock.lock()
         guard !done else { lock.unlock(); return }
         done = true
@@ -790,12 +1166,12 @@ final class FinishGate: @unchecked Sendable {
 /// Single-resume gate for capture continuations.
 final class CaptureGate: @unchecked Sendable {
     private let lock = NSLock()
-    private var done = false
+    nonisolated(unsafe) private var done = false
     private let cont: CheckedContinuation<YTDLPService.CapturedOutput, Error>
 
-    init(_ cont: CheckedContinuation<YTDLPService.CapturedOutput, Error>) { self.cont = cont }
+    nonisolated init(_ cont: CheckedContinuation<YTDLPService.CapturedOutput, Error>) { self.cont = cont }
 
-    func resume(returning value: YTDLPService.CapturedOutput) {
+    nonisolated func resume(returning value: YTDLPService.CapturedOutput) {
         lock.lock()
         guard !done else { lock.unlock(); return }
         done = true
@@ -803,7 +1179,7 @@ final class CaptureGate: @unchecked Sendable {
         cont.resume(returning: value)
     }
 
-    func resume(throwing error: Error) {
+    nonisolated func resume(throwing error: Error) {
         lock.lock()
         guard !done else { lock.unlock(); return }
         done = true
@@ -814,20 +1190,23 @@ final class CaptureGate: @unchecked Sendable {
 
 /// Plain byte buffer for cross-thread pipe draining.
 final class DataBox: @unchecked Sendable {
-    var data = Data()
+    nonisolated(unsafe) var data = Data()
+    nonisolated init() {}
 }
 
 /// Lock-guarded boolean flag.
 final class LockedFlag: @unchecked Sendable {
     private let lock = NSLock()
-    private var flag = false
+    nonisolated(unsafe) private var flag = false
 
-    var value: Bool {
+    nonisolated init() {}
+
+    nonisolated var value: Bool {
         lock.lock(); defer { lock.unlock() }
         return flag
     }
 
-    func set() {
+    nonisolated func set() {
         lock.lock(); defer { lock.unlock() }
         flag = true
     }

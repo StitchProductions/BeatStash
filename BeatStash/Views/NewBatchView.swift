@@ -167,6 +167,13 @@ struct NewBatchView: View {
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
+                    if store.needsEnrichment {
+                        Button("Get full details") {
+                            Task { await store.enrichDrafts() }
+                        }
+                        .buttonStyle(.link)
+                        .help("Fetch durations and years for these tracks (slower full probe)")
+                    }
                     Text("Est. \(String(format: "%.0f", store.estimatedSizeMB)) MB")
                         .foregroundStyle(.secondary)
                         .font(.callout)

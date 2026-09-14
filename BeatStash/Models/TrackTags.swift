@@ -10,7 +10,7 @@ public struct TrackTags: Codable, Sendable, Equatable {
     public var year: String?
     public var genre: String?
 
-    public init(
+    public nonisolated init(
         artist: String = "",
         title: String = "",
         album: String = "",

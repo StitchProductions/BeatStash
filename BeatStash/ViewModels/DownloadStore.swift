@@ -221,24 +221,126 @@ final class DownloadStore {
         if isFetching { isFetching = false }
     }
 
-    /// One-tap Download: probes the URL (cache-aware), selects every track,
-    /// enqueues in the chosen format, and asks the UI to show the queue.
-    /// Probe failures surface as `fetchError` with no navigation.
+    /// One-tap Download: instant drafts (disk/oEmbed, ~1s), enqueue everything
+    /// in the chosen format, jump to the queue — full details backfill while
+    /// downloading. Probe failures surface as `fetchError` with no navigation.
     func fetchAndDownloadAll() async {
-        let urls = URLParser.extractURLs(from: urlText)
-        guard urls.first != nil else {
+        let urls = dedupedURLs(from: urlText)
+        guard !urls.isEmpty else {
             fetchError = "Paste a YouTube link, playlist, or video ID."
             return
         }
-        await fetch()
-        guard fetchError == nil, !draftJobs.isEmpty, !Task.isCancelled else { return }
-        // Only proceed if the drafts still belong to the links we started with
-        // (the user may have typed new links mid-probe, superseding us).
-        let now = URLParser.extractURLs(from: urlText)
-        guard now == urls else { return }
-        setAllSelected(true)
-        enqueueSelected()
-        NotificationCenter.default.post(name: .beatStashShowQueue, object: nil)
+        fetchTask?.cancel()
+        await service.cancelProbes()
+        let session = UUID()
+        fetchSession = session
+        let task = Task { await performFetchThenDownload(session: session, urls: urls) }
+        fetchTask = task
+        await task.value
+        if fetchSession == session { fetchTask = nil }
+    }
+
+    /// Draft singles still missing full details (duration/year).
+    var needsEnrichment: Bool {
+        !isFetching && draftJobs.contains { $0.duration == nil && $0.playlistTitle == nil }
+    }
+
+    /// On-demand full details for instant drafts: probes each duration-less
+    /// single (serial, throttle-safe), fills in place without touching
+    /// user-edited tags, and warms both caches. Playlists expand on fetch;
+    /// this never appends rows, so mid-enrich edits can't resurrect anything.
+    func enrichDrafts() async {
+        let targets = dedupedURLs(from: draftJobs
+            .filter { $0.duration == nil && $0.playlistTitle == nil }
+            .map(\.url).joined(separator: "\n"))
+        guard !targets.isEmpty, !isFetching else { return }
+        fetchTask?.cancel()
+        await service.cancelProbes()
+        let session = UUID()
+        fetchSession = session
+        let task = Task { await performEnrich(session: session, urls: targets) }
+        fetchTask = task
+        await task.value
+        if fetchSession == session { fetchTask = nil }
+    }
+
+    private func performEnrich(session: UUID, urls: [String]) async {
+        if Task.isCancelled { return }
+        guard fetchSession == session else { return }
+        isFetching = true
+        fetchProgress = urls.count > 1 ? "Enriching 0/\(urls.count)…" : "Enriching details…"
+        defer {
+            if fetchSession == session { isFetching = false }
+            fetchProgress = nil
+        }
+        do {
+            let outcomes = try await probeAll(urls: urls, label: "Enriching")
+            guard fetchSession == session else { return }
+            try Task.checkCancellation()
+            let merged = mergeTier2(outcomes: outcomes, into: draftJobs, appendMissing: false)
+            draftJobs = merged.jobs
+            // Durations filling in is the feedback; failures stay silent
+            // best-effort top-up (the drafts were already decision-grade).
+        } catch is CancellationError {
+            guard fetchSession == session else { return }
+        } catch {
+            guard fetchSession == session else { return }
+        }
+    }
+
+    private func performFetchThenDownload(session: UUID, urls: [String]) async {
+        if Task.isCancelled { return }
+        guard fetchSession == session else { return }
+        isFetching = true
+        fetchError = nil
+        draftJobs = []
+        probeTitle = nil
+        fetchProgress = urls.count > 1 ? "Fetching 0/\(urls.count)…" : nil
+        defer {
+            if fetchSession == session { isFetching = false }
+            fetchProgress = nil
+        }
+        do {
+            // Instant tiers only — downloads start on best-available tags.
+            let tier1 = try await buildTier1(urls: urls)
+            guard fetchSession == session else { return }
+            try Task.checkCancellation()
+            var jobs = tier1.jobs
+            var failures: [String] = []
+            var pending = tier1.pending
+            finalizeFetch(urls: urls, jobs: jobs, oEmbedTitles: tier1.titles,
+                          pending: pending.count, failures: [])
+            // Nothing instant: run the full probe before giving up.
+            if jobs.isEmpty, !pending.isEmpty {
+                let outcomes = try await probeAll(urls: pending, label: "Fetching")
+                guard fetchSession == session else { return }
+                try Task.checkCancellation()
+                let merged = mergeTier2(outcomes: outcomes, into: jobs)
+                jobs = merged.jobs
+                failures = merged.failures
+                pending = []
+                finalizeFetch(urls: urls, jobs: jobs, oEmbedTitles: tier1.titles,
+                              pending: 0, failures: failures)
+            }
+            guard fetchError == nil, !jobs.isEmpty, !Task.isCancelled else { return }
+            let now = dedupedURLs(from: urlText)
+            guard now == urls else { return } // superseded by new input
+            setAllSelected(true)
+            enqueueSelected()
+            NotificationCenter.default.post(name: .beatStashShowQueue, object: nil)
+            // No trailing enrichment: instant drafts are decision-grade by
+            // design. Playlists/misses were already resolved above when needed.
+        } catch is CancellationError {
+            guard fetchSession == session else { return }
+            fetchError = nil
+        } catch {
+            guard fetchSession == session else { return }
+            if !Task.isCancelled {
+                fetchError = error.localizedDescription
+            } else {
+                fetchError = nil
+            }
+        }
     }
 
     private func performFetch(session: UUID) async {
@@ -260,73 +362,25 @@ final class DownloadStore {
         }
 
         do {
-            let outcomes = try await probeAll(urls: urls)
-            guard fetchSession == session else { return } // superseded mid-probe
+            // Tier 0+1: disk cache + instant oEmbed — drafts appear in ~a second.
+            let tier1 = try await buildTier1(urls: urls)
+            guard fetchSession == session else { return }
+            var jobs = tier1.jobs
+            var failures: [String] = []
+            finalizeFetch(urls: urls, jobs: jobs, oEmbedTitles: tier1.titles,
+                          pending: tier1.pending.count, failures: [])
             try Task.checkCancellation()
-            var jobs: [DownloadJob] = []
-            var failureMessages: [String] = []
-            for o in outcomes {
-                switch o.result {
-                case .single(let media)?:
-                    let tags = TagParser.parse(
-                        title: media.safeTitle,
-                        uploader: media.safeUploader,
-                        playlistTitle: nil,
-                        playlistIndex: nil,
-                        uploadDate: media.uploadDate
-                    )
-                    jobs.append(DownloadJob(
-                        url: o.url,
-                        kind: batchMode,
-                        displayTitle: media.safeTitle,
-                        thumbnailURL: media.thumbnail,
-                        duration: media.duration,
-                        audioFormat: batchFormat,
-                        videoQuality: videoQuality,
-                        tags: tags
-                    ))
-                case .playlist(let title, let entries)?:
-                    for e in entries {
-                        let tags = TagParser.parse(
-                            title: e.safeTitle,
-                            uploader: e.uploader,
-                            playlistTitle: title,
-                            playlistIndex: e.playlistIndex,
-                            uploadDate: nil
-                        )
-                        jobs.append(DownloadJob(
-                            url: e.webpageURL,
-                            kind: .audio, // playlists are audio-first in v1
-                            playlistTitle: title,
-                            playlistIndex: e.playlistIndex,
-                            displayTitle: e.safeTitle,
-                            thumbnailURL: e.thumbnail,
-                            duration: e.duration,
-                            audioFormat: batchFormat,
-                            tags: tags
-                        ))
-                    }
-                case nil:
-                    if let m = o.message { failureMessages.append(m) }
-                }
-            }
-            draftJobs = jobs
-            if urls.count == 1, let only = outcomes.first,
-               case .playlist(let title, _) = only.result {
-                // Single-playlist fetch: title + batch directory follow it.
-                probeTitle = title ?? "Playlist (\(jobs.count) tracks)"
-                destination = AppSettings.batchDirectory(playlistTitle: title)
-            } else if urls.count == 1 {
-                probeTitle = jobs.first?.displayTitle
-            } else {
-                var t = "\(jobs.count) track\(jobs.count == 1 ? "" : "s") from \(urls.count) links"
-                if !failureMessages.isEmpty { t += " · \(failureMessages.count) failed" }
-                probeTitle = t
-            }
-            // A total failure surfaces the first error; partial failures ride
-            // along in the title while the good tracks stay downloadable.
-            if jobs.isEmpty {
-                fetchError = failureMessages.first ?? "Couldn't read video info."
+            // Tier 2: full-probe enrichment (serial, throttle-safe).
+            if !tier1.pending.isEmpty {
+                if tier1.pending.count == 1, urls.count == 1 { fetchProgress = "Enriching details…" }
+                let outcomes = try await probeAll(urls: tier1.pending, label: "Enriching")
+                guard fetchSession == session else { return }
+                try Task.checkCancellation()
+                let merged = mergeTier2(outcomes: outcomes, into: jobs)
+                jobs = merged.jobs
+                failures = merged.failures
+                finalizeFetch(urls: urls, jobs: jobs, oEmbedTitles: tier1.titles,
+                              pending: 0, failures: failures)
             }
         } catch is CancellationError {
             // User pressed Cancel (or superseded by a new fetch) — stay quiet.
@@ -362,7 +416,7 @@ final class DownloadStore {
     ///
     /// Deliberately serial: YouTube throttles concurrent extractions from one
     /// IP (measured 3-at-a-time at ~70s with timeouts vs ~13–19s each serially).
-    private func probeAll(urls: [String]) async throws -> [ProbeOutcome] {
+    private func probeAll(urls: [String], label: String = "Fetching") async throws -> [ProbeOutcome] {
         var ordered: [ProbeOutcome] = []
         for (i, url) in urls.enumerated() {
             try Task.checkCancellation()
@@ -374,9 +428,191 @@ final class DownloadStore {
             } catch {
                 ordered.append(ProbeOutcome(index: i, url: url, result: nil, message: error.localizedDescription))
             }
-            if urls.count > 1 { fetchProgress = "Fetching \(ordered.count)/\(urls.count)…" }
+            if urls.count > 1 { fetchProgress = "\(label) \(ordered.count)/\(urls.count)…" }
         }
         return ordered
+    }
+
+    // MARK: - Two-tier fetch (instant oEmbed + enriching probe)
+
+    private struct Tier1Result {
+        var jobs: [DownloadJob]
+        var titles: [String: String] // playlist URL → oEmbed title
+        var pending: [String] // URLs still needing the full probe
+    }
+
+    /// Instant draft from oEmbed metadata (no duration/date — those backfill).
+    /// Pure: covered by tests.
+    static func draftFromOEmbed(
+        url: String, video: OEmbedVideo,
+        format: AudioFormat, quality: VideoQuality, mode: DownloadKind
+    ) -> DownloadJob {
+        let tags = TagParser.parse(title: video.title, uploader: video.authorName)
+        return DownloadJob(
+            url: url,
+            kind: mode,
+            displayTitle: tags.title.isEmpty ? video.title : tags.title,
+            thumbnailURL: video.thumbnailURL,
+            audioFormat: format,
+            videoQuality: quality,
+            tags: tags
+        )
+    }
+
+    private func makeSingleJob(url: String, media: MediaInfo) -> DownloadJob {
+        let tags = TagParser.parse(
+            title: media.safeTitle,
+            uploader: media.safeUploader,
+            playlistTitle: nil,
+            playlistIndex: nil,
+            uploadDate: media.uploadDate
+        )
+        return DownloadJob(
+            url: url,
+            kind: batchMode,
+            displayTitle: media.safeTitle,
+            thumbnailURL: media.thumbnail,
+            duration: media.duration,
+            audioFormat: batchFormat,
+            videoQuality: videoQuality,
+            tags: tags
+        )
+    }
+
+    private func makePlaylistJobs(title: String?, entries: [PlaylistEntry]) -> [DownloadJob] {
+        entries.map { e in
+            let tags = TagParser.parse(
+                title: e.safeTitle,
+                uploader: e.uploader,
+                playlistTitle: title,
+                playlistIndex: e.playlistIndex,
+                uploadDate: nil
+            )
+            return DownloadJob(
+                url: e.webpageURL,
+                kind: .audio, // playlists are audio-first in v1
+                playlistTitle: title,
+                playlistIndex: e.playlistIndex,
+                displayTitle: e.safeTitle,
+                thumbnailURL: e.thumbnail,
+                duration: e.duration,
+                audioFormat: batchFormat,
+                tags: tags
+            )
+        }
+    }
+
+    /// Tier 0 (disk cache, full data) + Tier 1 (oEmbed, ~0.15s/link).
+    /// Never throws except on cancellation; everything missed lands in `pending`.
+    private func buildTier1(urls: [String]) async throws -> Tier1Result {
+        var jobs: [DownloadJob] = []
+        var titles: [String: String] = [:]
+        var pending: [String] = []
+        var done = 0
+        for url in urls {
+            try Task.checkCancellation()
+            if let cached = await service.diskCachedProbe(for: url) {
+                switch cached {
+                case .single(let media):
+                    jobs.append(makeSingleJob(url: url, media: media))
+                case .playlist(let title, let entries):
+                    jobs += makePlaylistJobs(title: title, entries: entries)
+                }
+            } else if let video = try await oEmbedOrNil(url) {
+                if YTDLPService.isListURL(url) {
+                    titles[url] = video.title
+                } else {
+                    jobs.append(Self.draftFromOEmbed(
+                        url: url, video: video,
+                        format: batchFormat, quality: videoQuality, mode: batchMode))
+                }
+                pending.append(url)
+            } else {
+                pending.append(url)
+            }
+            done += 1
+            if urls.count > 1 { fetchProgress = "Fetching \(done)/\(urls.count)…" }
+        }
+        return Tier1Result(jobs: jobs, titles: titles, pending: pending)
+    }
+
+    /// oEmbed miss that rethrows cancellation (plain `try?` would swallow it).
+    private func oEmbedOrNil(_ url: String) async throws -> OEmbedVideo? {
+        do {
+            return try await service.fetchOEmbed(url: url)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            return nil
+        }
+    }
+
+    /// Folds full-probe outcomes into drafts: singles update in place
+    /// (never clobbering user-edited tags), playlists append, misses record.
+    /// With `appendMissing: false` (on-demand enrich), unknown URLs are
+    /// skipped instead of appended, so mid-enrich edits can't resurrect rows.
+    private func mergeTier2(outcomes: [ProbeOutcome], into jobs: [DownloadJob], appendMissing: Bool = true) -> (jobs: [DownloadJob], failures: [String]) {
+        var jobs = jobs
+        var failures: [String] = []
+        for o in outcomes {
+            switch o.result {
+            case .single(let media)?:
+                if let i = jobs.firstIndex(where: { $0.url == o.url && $0.playlistTitle == nil }) {
+                    jobs[i].duration = media.duration
+                    jobs[i].thumbnailURL = media.thumbnail
+                    if !jobs[i].tagsEdited {
+                        jobs[i].displayTitle = media.safeTitle
+                        jobs[i].tags = TagParser.parse(
+                            title: media.safeTitle,
+                            uploader: media.safeUploader,
+                            playlistTitle: nil,
+                            playlistIndex: nil,
+                            uploadDate: media.uploadDate
+                        )
+                    }
+                } else if appendMissing {
+                    jobs.append(makeSingleJob(url: o.url, media: media))
+                }
+            case .playlist(let title, let entries)?:
+                jobs += makePlaylistJobs(title: title, entries: entries)
+            case nil:
+                if let m = o.message { failures.append(m) }
+            }
+        }
+        return (jobs, failures)
+    }
+
+    /// Publishes drafts + title + destination + error. `pending` = Tier-2
+    /// still outstanding (suppresses the total-failure error until it lands).
+    private func finalizeFetch(
+        urls: [String], jobs: [DownloadJob],
+        oEmbedTitles: [String: String], pending: Int, failures: [String]
+    ) {
+        draftJobs = jobs
+        if urls.count == 1, let u = urls.first {
+            if let pt = jobs.first(where: { $0.playlistTitle != nil })?.playlistTitle {
+                probeTitle = pt
+                destination = AppSettings.batchDirectory(playlistTitle: pt)
+            } else if YTDLPService.isListURL(u), let t = oEmbedTitles[u] {
+                probeTitle = t
+                destination = AppSettings.batchDirectory(playlistTitle: t)
+            } else if YTDLPService.isListURL(u) {
+                probeTitle = pending > 0 ? "Loading playlist…" : nil
+            } else {
+                probeTitle = jobs.first?.displayTitle
+            }
+        } else {
+            var t = "\(jobs.count) track\(jobs.count == 1 ? "" : "s") from \(urls.count) links"
+            if !failures.isEmpty { t += " · \(failures.count) failed" }
+            probeTitle = t
+        }
+        // A total failure surfaces the first error; partial failures ride
+        // along in the title while the good tracks stay downloadable.
+        if jobs.isEmpty && pending == 0 {
+            fetchError = failures.first ?? "Couldn't read video info."
+        } else {
+            fetchError = nil
+        }
     }
 
     // MARK: - Batch format (two-level picker)
@@ -455,11 +691,14 @@ final class DownloadStore {
         queue[i].status = .queued
         queue[i].progress = 0
         queue[i].errorMessage = nil
+        transientFailures.removeValue(forKey: id)
         pump()
     }
 
     func cancel(id: UUID) {
         Task { await service.cancel(id: id) }
+        preparingIDs.remove(id)
+        transientFailures.removeValue(forKey: id)
         if let i = queue.firstIndex(where: { $0.id == id }) {
             if queue[i].status.isActive {
                 queue[i].status = .cancelled
@@ -471,6 +710,8 @@ final class DownloadStore {
     func cancelAll() {
         for j in queue where j.status.isActive {
             Task { await service.cancel(id: j.id) }
+            preparingIDs.remove(j.id)
+            transientFailures.removeValue(forKey: j.id)
         }
         for i in queue.indices where queue[i].status.isActive {
             queue[i].status = .cancelled
@@ -484,6 +725,14 @@ final class DownloadStore {
     var activeCount: Int { queue.filter { $0.status.isActive }.count }
     var finishedCount: Int { queue.filter { $0.status == .completed }.count }
 
+    /// Jobs started but not yet streaming progress (extracting/preparing).
+    /// Shown as an indeterminate "Preparing…" row state in the queue.
+    var preparingIDs: Set<UUID> = []
+
+    /// Transient-failure counts for bounded auto-requeue (in-memory only:
+    /// a relaunch starts every job with a clean slate).
+    private var transientFailures: [UUID: Int] = [:]
+
     private func pump() {
         // Launch up to maxConcurrent queued jobs.
         while runningCount < maxConcurrent,
@@ -495,6 +744,7 @@ final class DownloadStore {
     private func run(jobID: UUID) {
         guard let idx = queue.firstIndex(where: { $0.id == jobID }) else { return }
         queue[idx].status = .downloading
+        preparingIDs.insert(jobID)
         runningCount += 1
         let job = queue[idx]
         let dir = URL(fileURLWithPath: job.outputPath ?? destination.path)
@@ -509,12 +759,15 @@ final class DownloadStore {
                             self.queue[i].progress = update.fraction
                             self.queue[i].speedString = update.speed
                             self.queue[i].etaString = update.eta
+                            self.preparingIDs.remove(jobID)
                         }
                     }
                 }
                 // Resolve newest file for history (service already tagged).
                 finalPath = await self.newestPath(in: dir)
                 await MainActor.run {
+                    self.preparingIDs.remove(jobID)
+                    self.transientFailures.removeValue(forKey: jobID)
                     if let i = self.queue.firstIndex(where: { $0.id == jobID }) {
                         self.queue[i].status = .completed
                         self.queue[i].progress = 1
@@ -536,6 +789,7 @@ final class DownloadStore {
                 }
             } catch is CancellationError {
                 await MainActor.run {
+                    self.preparingIDs.remove(jobID)
                     if let i = self.queue.firstIndex(where: { $0.id == jobID }) {
                         self.queue[i].status = .cancelled
                     }
@@ -544,15 +798,21 @@ final class DownloadStore {
                 }
             } catch {
                 await MainActor.run {
-                    if let i = self.queue.firstIndex(where: { $0.id == jobID }) {
-                        // yt-dlp terminate() surfaces as non-zero exit → mark cancelled if user asked.
-                        if (error as? YTDLPService.ServiceError) != nil {
-                            self.queue[i].status = .failed
-                            self.queue[i].errorMessage = error.localizedDescription
-                        } else {
-                            self.queue[i].status = .failed
-                            self.queue[i].errorMessage = error.localizedDescription
-                        }
+                    self.preparingIDs.remove(jobID)
+                    let used = self.transientFailures[jobID] ?? 0
+                    if YTDLPService.shouldAutoRequeue(error: error, attemptsUsed: used),
+                       let i = self.queue.firstIndex(where: { $0.id == jobID }) {
+                        // Transient (stale player session, healed network):
+                        // back to the queue for a pump-paced retry instead of
+                        // failing outright. Cap enforced by the policy.
+                        self.transientFailures[jobID] = used + 1
+                        self.queue[i].status = .queued
+                        self.queue[i].progress = 0
+                        self.queue[i].errorMessage = "Auto-retrying (attempt \(used + 2)/3)…"
+                    } else if let i = self.queue.firstIndex(where: { $0.id == jobID }) {
+                        self.transientFailures.removeValue(forKey: jobID)
+                        self.queue[i].status = .failed
+                        self.queue[i].errorMessage = error.localizedDescription
                     }
                     self.runningCount = max(0, self.runningCount - 1)
                     self.pump()

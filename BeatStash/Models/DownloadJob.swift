@@ -34,6 +34,10 @@ public struct DownloadJob: Identifiable, Codable, Sendable {
     public var thumbnailURL: String?
     public var duration: Double?
 
+    /// Spotify (or other source) artwork to embed at tag time, replacing any
+    /// YouTube thumbnail. Nil = keep whatever the download embedded.
+    public var artworkURL: String? = nil
+
     // Format selection
     public var audioFormat: AudioFormat
     public var videoQuality: VideoQuality
@@ -61,6 +65,7 @@ public struct DownloadJob: Identifiable, Codable, Sendable {
         displayTitle: String,
         thumbnailURL: String? = nil,
         duration: Double? = nil,
+        artworkURL: String? = nil,
         audioFormat: AudioFormat = .m4a,
         videoQuality: VideoQuality = .hd1080p,
         isFormatOverridden: Bool = false,
@@ -78,6 +83,7 @@ public struct DownloadJob: Identifiable, Codable, Sendable {
         self.displayTitle = displayTitle
         self.thumbnailURL = thumbnailURL
         self.duration = duration
+        self.artworkURL = artworkURL
         self.audioFormat = audioFormat
         self.videoQuality = videoQuality
         self.isFormatOverridden = isFormatOverridden

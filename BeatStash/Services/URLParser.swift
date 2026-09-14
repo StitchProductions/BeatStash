@@ -11,7 +11,7 @@ public enum URLParser: Sendable {
     }
 
     /// Split pasted text into candidate URLs (one per line, also comma/space separated).
-    public static func extractURLs(from text: String) -> [String] {
+    public nonisolated static func extractURLs(from text: String) -> [String] {
         let separators = CharacterSet(charactersIn: "\n,")
         let chunks = text.components(separatedBy: separators)
             .flatMap { $0.components(separatedBy: .whitespaces) }
@@ -22,23 +22,23 @@ public enum URLParser: Sendable {
             .map { normalize($0) }
     }
 
-    public static func isBareVideoID(_ s: String) -> Bool {
+    public nonisolated static func isBareVideoID(_ s: String) -> Bool {
         let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
         return s.count == 11 && s.unicodeScalars.allSatisfy { allowed.contains($0) }
     }
 
-    public static func isYouTubeURL(_ s: String) -> Bool {
+    public nonisolated static func isYouTubeURL(_ s: String) -> Bool {
         guard let url = URL(string: s.lowercased()), url.scheme?.hasPrefix("http") == true else { return false }
         let host = url.host ?? ""
         return host.contains("youtube.com") || host.contains("youtu.be") || host.contains("music.youtube.com")
     }
 
-    public static func normalize(_ s: String) -> String {
+    public nonisolated static func normalize(_ s: String) -> String {
         if isBareVideoID(s) { return "https://www.youtube.com/watch?v=\(s)" }
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    public static func kind(of urlString: String) -> Kind {
+    public nonisolated static func kind(of urlString: String) -> Kind {
         let lower = urlString.lowercased()
         if lower.contains("list=") || lower.contains("/playlist") { return .playlist }
         if lower.contains("/shorts/") { return .shorts }
@@ -46,7 +46,7 @@ public enum URLParser: Sendable {
         return .unknown
     }
 
-    public static func isPlausiblySupported(_ s: String) -> Bool {
+    public nonisolated static func isPlausiblySupported(_ s: String) -> Bool {
         isYouTubeURL(s) || isBareVideoID(s)
     }
 }

@@ -30,6 +30,9 @@ struct SidebarView: View {
                 NavigationLink(value: SidebarDestination.history) {
                     Label("History", systemImage: "clock")
                 }
+                NavigationLink(value: SidebarDestination.spotify) {
+                    Label("Spotify", systemImage: "music.note.list")
+                }
             }
             Section("App") {
                 NavigationLink(value: SidebarDestination.settings) {
@@ -41,15 +44,12 @@ struct SidebarView: View {
         .navigationTitle("BeatStash")
         .safeAreaInset(edge: .bottom) {
             VStack(alignment: .leading, spacing: 2) {
-                if let v = store.ytDlpVersion {
-                    Text("yt-dlp \(v)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("yt-dlp …")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
+                Text("Made with 💚 by Stitch")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Text("Made possibly by yt-dlp")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
                 if !store.binariesReady {
                     Text("Setup needed")
                         .font(.caption2)
