@@ -96,6 +96,12 @@ struct QueueRowView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
+                    if let note = job.tagNote {
+                        Text(note)
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .lineLimit(1)
+                    }
                 }
             }
             Spacer()

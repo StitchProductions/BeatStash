@@ -25,9 +25,6 @@ enum SHA256Hex {
 /// - Player-client fallback chains + cookies/PO-token support via
 ///   `YouTubeAuth`. First success wins, even format-gated (metadata intact).
 public actor YTDLPService: Sendable {
-    /// Legacy default chain, kept for API compatibility.
-    public static let playerClients = "android,ios,tv"
-
     /// Per-probe-attempt budget. First attempt gets the full budget,
     /// fallback chains get a shorter one so total fetch stays < ~70s.
     public static let probeTimeoutFirst: TimeInterval = 30
@@ -344,6 +341,9 @@ public actor YTDLPService: Sendable {
     // MARK: - Probe helpers
 
     public nonisolated static func isListURL(_ url: String) -> Bool {
+        // Search queries resolve to one video, never a playlist — even when
+        // the query text itself contains "list=".
+        if URLParser.isSearchURL(url) { return false }
         let lower = url.lowercased()
         return lower.contains("list=") || lower.contains("/playlist")
     }
@@ -773,7 +773,14 @@ public actor YTDLPService: Sendable {
         // Serialize extraction: concurrent player-API extractions throttle
         // each other. Released on first progress (bytes flowing → the slow
         // part is over) or attempt end, so downloads still overlap.
-        await Self.extractionGate.acquire()
+        // Cancelled while parked: no permit taken, so nothing to release —
+        // just drop the tracked-but-never-launched process and propagate.
+        do {
+            try await Self.extractionGate.acquire()
+        } catch {
+            active.removeValue(forKey: job.id)
+            throw error
+        }
         let gateReleased = LockedFlag()
         let releaseExtractionOnce: @Sendable () -> Void = {
             if !gateReleased.value {
@@ -1132,8 +1139,9 @@ public actor YTDLPService: Sendable {
     /// any YouTube thumbnail); failures fall back to text-only tagging.
     /// The temp file replaces the original only on a clean ffmpeg exit with
     /// non-empty output — a killed/timed-out pass keeps the yt-dlp output.
-    public func applyTags(to file: URL, tags: TrackTags, format: AudioFormat, artworkURL: String? = nil) async throws {
-        guard let ffmpeg = await binaries.ffmpegPath else { return } // no ffmpeg → keep untagged file
+    /// Returns whether tags were applied (false = audio kept as downloaded).
+    public func applyTags(to file: URL, tags: TrackTags, format: AudioFormat, artworkURL: String? = nil) async throws -> Bool {
+        guard let ffmpeg = await binaries.ffmpegPath else { return false } // no ffmpeg → keep untagged file
         let tmp = file.deletingLastPathComponent().appendingPathComponent(".\(file.deletingPathExtension().lastPathComponent).tagged.\(file.pathExtension)")
         try? FileManager.default.removeItem(at: tmp) // stale temp from a killed pass
         var args = ["-y", "-i", file.path]
@@ -1148,24 +1156,39 @@ public actor YTDLPService: Sendable {
             let out = try await runCapture(exe: ffmpeg, args: args, timeout: 60)
             guard out.exitCode == 0 else {
                 try? FileManager.default.removeItem(at: tmp)
-                return
+                return false
             }
         } catch {
             try? FileManager.default.removeItem(at: tmp)
-            return
+            return false
         }
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: tmp.path),
               let size = attrs[.size] as? NSNumber, size.intValue > 0
         else {
             try? FileManager.default.removeItem(at: tmp)
-            return
+            return false
         }
         do {
             _ = try FileManager.default.replaceItemAt(file, withItemAt: tmp)
         } catch {
-            try? FileManager.default.removeItem(at: file)
-            try? FileManager.default.moveItem(at: tmp, to: file)
+            // replaceItemAt can fail across volumes/edge cases: stage the
+            // original aside first so a failed move can never lose the file.
+            let backup = file.deletingLastPathComponent().appendingPathComponent(".\(file.deletingPathExtension().lastPathComponent).orig.\(file.pathExtension)")
+            try? FileManager.default.removeItem(at: backup)
+            do {
+                try FileManager.default.moveItem(at: file, to: backup)
+                try FileManager.default.moveItem(at: tmp, to: file)
+                try? FileManager.default.removeItem(at: backup)
+            } catch {
+                // Best-effort restore; the original is never deleted first.
+                if !FileManager.default.fileExists(atPath: file.path) {
+                    try? FileManager.default.moveItem(at: backup, to: file)
+                }
+                try? FileManager.default.removeItem(at: tmp)
+                return false
+            }
         }
+        return true
     }
 
     /// Artwork cache cap (files; oldest mtime pruned on write).
@@ -1424,7 +1447,12 @@ public actor YTDLPService: Sendable {
         }
     }
 
-    private static func newestFile(in dir: URL, matching job: DownloadJob) -> URL? {
+    /// Newest file for a job's expected extension (audio format / mp4).
+    /// Shared fallback for completion paths when `--print after_move:filepath`
+    /// misses: the extension filter keeps concurrent jobs from attributing
+    /// each other's files. Internal so the store uses this instead of its own
+    /// unfiltered scan.
+    static func newestFile(in dir: URL, matching job: DownloadJob) -> URL? {
         let ext = job.kind == .audio ? job.audioFormat.fileExtension : "mp4"
         return newestFile(in: dir, matchingExtension: ext)
     }
@@ -1575,23 +1603,50 @@ final class LockedFlag: @unchecked Sendable {
 
 /// Minimal async semaphore (permits + FIFO waiter queue), for serializing
 /// download extraction across concurrent jobs. Lock-guarded; `acquire`
-/// suspends without blocking a thread.
+/// suspends without blocking a thread and throws on cancellation (a
+/// cancelled waiter is dequeued, so Cancel can never strand a slot and
+/// stall the queue).
 final class AsyncSemaphore: @unchecked Sendable {
     private let lock = NSLock()
     nonisolated(unsafe) private var permits: Int
-    nonisolated(unsafe) private var waiters: [CheckedContinuation<Void, Never>] = []
+    nonisolated(unsafe) private var waiters: [(id: UUID, cont: CheckedContinuation<Void, Error>)] = []
 
     nonisolated init(limit: Int) { permits = max(limit, 1) }
 
-    func acquire() async {
-        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+    private final class WaiterBox: @unchecked Sendable {
+        let id = UUID()
+        nonisolated(unsafe) var parked = false
+    }
+
+    func acquire() async throws {
+        let box = WaiterBox()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                lock.lock()
+                if Task.isCancelled {
+                    // Pre-cancelled: never park (the handler may already have
+                    // fired and found nothing to remove).
+                    lock.unlock()
+                    cont.resume(throwing: CancellationError())
+                } else if permits > 0 {
+                    permits -= 1
+                    lock.unlock()
+                    cont.resume()
+                } else {
+                    box.parked = true
+                    waiters.append((id: box.id, cont: cont))
+                    lock.unlock()
+                }
+            }
+        } onCancel: {
             lock.lock()
-            if permits > 0 {
-                permits -= 1
+            if box.parked,
+               let i = waiters.firstIndex(where: { $0.id == box.id }) {
+                let entry = waiters.remove(at: i)
+                box.parked = false
                 lock.unlock()
-                cont.resume()
+                entry.cont.resume(throwing: CancellationError())
             } else {
-                waiters.append(cont)
                 lock.unlock()
             }
         }
@@ -1606,7 +1661,7 @@ final class AsyncSemaphore: @unchecked Sendable {
         }
         let next = waiters.removeFirst()
         lock.unlock()
-        next.resume()
+        next.cont.resume()
     }
 }
 

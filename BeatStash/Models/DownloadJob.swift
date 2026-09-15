@@ -57,6 +57,10 @@ public struct DownloadJob: Identifiable, Codable, Sendable {
     public var phaseLabel: String?
     public var errorMessage: String?
     public var outputPath: String?
+    /// Tag-pass outcome note ("Tags not applied — …"). Set at completion,
+    /// cleared on retry. Persisted like the rest of the row (default keeps
+    /// old queue files decoding).
+    public var tagNote: String? = nil
     public var selected: Bool // playlist checkbox
 
     public init(

@@ -22,6 +22,14 @@ final class DownloadStore {
     var batchMode: DownloadKind = .audio
     var destination: URL = AppSettings.destinationRoot
 
+    /// Single write path for the library location — both choosers
+    /// (Settings, New Batch) route here so UserDefaults and the live
+    /// store can never drift.
+    func setDestination(_ url: URL) {
+        destination = url
+        UserDefaults.standard.set(url.path, forKey: "destinationRoot")
+    }
+
     // MARK: - Queue
 
     var queue: [DownloadJob] = []
@@ -727,6 +735,7 @@ final class DownloadStore {
         queue[i].progress = 0
         queue[i].phaseLabel = nil
         queue[i].errorMessage = nil
+        queue[i].tagNote = nil
         transientFailures.removeValue(forKey: id)
         stopPreparingTicker(id)
         saveQueue()
@@ -939,7 +948,7 @@ final class DownloadStore {
                     && (job.tagsEdited || !(job.artworkURL?.isEmpty ?? true))
                 var finalPath: String? = await service.takeFinishedPath(for: jobID)?.path
                 if finalPath == nil {
-                    finalPath = await self.newestPath(in: dir)
+                    finalPath = YTDLPService.newestFile(in: dir, matching: job)?.path
                 }
                 await MainActor.run {
                     self.preparingIDs.remove(jobID)
@@ -952,19 +961,24 @@ final class DownloadStore {
                     self.saveQueue()
                     self.pump()
                 }
+                var tagsApplied = true
                 if needsTagging, let path = finalPath {
-                    try? await service.applyTags(
+                    tagsApplied = (try? await service.applyTags(
                         to: URL(fileURLWithPath: path), tags: job.tags,
-                        format: job.audioFormat, artworkURL: job.artworkURL)
+                        format: job.audioFormat, artworkURL: job.artworkURL)) ?? false
                 }
                 // Tagging replaces in place, so the download path stays
                 // correct; only fall back to a scan if somehow the file isn't
-                // where yt-dlp said it put it.
+                // where yt-dlp said it put it (and only trust files, since a
+                // confirmed directory would mislead Finder-reveal later).
                 var resolvedPath: String? = finalPath
-                if let p = resolvedPath, FileManager.default.fileExists(atPath: p) {
-                    // exact path confirmed — no scan needed.
+                var isDir: ObjCBool = false
+                if let p = resolvedPath,
+                   FileManager.default.fileExists(atPath: p, isDirectory: &isDir),
+                   !isDir.boolValue {
+                    // exact file confirmed — no scan needed.
                 } else {
-                    resolvedPath = await self.newestPath(in: dir)
+                    resolvedPath = YTDLPService.newestFile(in: dir, matching: job)?.path
                 }
                 // WAV never embeds covers, so any same-stem image born during
                 // this run is thumbnail residue from a failed/old flow — sweep
@@ -986,6 +1000,8 @@ final class DownloadStore {
                         self.queue[i].status = .completed
                         self.queue[i].progress = 1
                         self.queue[i].phaseLabel = nil
+                        // A failed tag pass keeps the audio but says so on the row.
+                        self.queue[i].tagNote = tagsApplied ? nil : "Tags not applied — file kept as downloaded"
                         if let p = resolvedPath {
                             self.queue[i].outputPath = p
                         }
@@ -1032,21 +1048,6 @@ final class DownloadStore {
                 }
             }
         }
-    }
-
-    private nonisolated func newestPath(in dir: URL) async -> String? {
-        let fm = FileManager.default
-        guard let items = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]) else { return nil }
-        var newest: URL?
-        var newestDate = Date.distantPast
-        for url in items {
-            let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            if date > newestDate {
-                newestDate = date
-                newest = url
-            }
-        }
-        return newest?.path
     }
 
     // MARK: - History persistence (JSON, lightweight v1)

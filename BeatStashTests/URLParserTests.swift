@@ -32,6 +32,25 @@ struct URLParserTests {
         #expect(URLParser.extractURLs(from: "   \n  ").isEmpty)
     }
 
+    @Test func searchQueryKeepsWholeLine() {
+        // Spotify handoff queries carry spaces — splitting would drop them.
+        #expect(URLParser.extractURLs(from: "ytsearch1:Adele Hello") == ["ytsearch1:Adele Hello"])
+        #expect(URLParser.isSearchURL("ytsearch1:Adele Hello"))
+        #expect(URLParser.isSearchURL("YTSEARCH5:x"))
+        #expect(!URLParser.isSearchURL("https://www.youtube.com/watch?v=x"))
+        #expect(!URLParser.isSearchURL("hello world"))
+        // Mixed paste: search lines survive alongside normal links.
+        #expect(URLParser.extractURLs(from: "ytsearch1:Adele Hello\nhttps://youtu.be/9bZkp7q19f0")
+            == ["ytsearch1:Adele Hello", "https://youtu.be/9bZkp7q19f0"])
+        #expect(URLParser.isPlausiblySupported("ytsearch1:Adele Hello"))
+    }
+
+    @Test func searchURLNeverAPlaylist() {
+        // A query containing "list=" must not route into the flat-playlist probe.
+        #expect(!YTDLPService.isListURL("ytsearch1:best playlist hits 2026"))
+        #expect(YTDLPService.isListURL("https://www.youtube.com/playlist?list=PLx"))
+    }
+
     @Test func elevenCharWordIsIDShaped() {
         // By design: any 11-char base64-ish token is treated as a video ID.
         #expect(URLParser.isBareVideoID("abcdefghijk"))

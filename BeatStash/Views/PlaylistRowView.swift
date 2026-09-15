@@ -2,6 +2,7 @@ import SwiftUI
 
 /// One playlist/batch row: checkbox + thumbnail + editable tags + per-track format.
 struct PlaylistRowView: View {
+    @Environment(DownloadStore.self) private var store
     @Binding var job: DownloadJob
     var onEditTags: () -> Void
 
@@ -61,9 +62,9 @@ struct PlaylistRowView: View {
                 ForEach(AudioFormat.allCases) { f in
                     Button {
                         job.audioFormat = f
-                        // Overridden relative to batch default stored in UserDefaults.
-                        let batchRaw = UserDefaults.standard.string(forKey: "defaultAudioFormat") ?? AudioFormat.m4a.rawValue
-                        job.isFormatOverridden = (f.rawValue != batchRaw)
+                        // Overridden relative to the live batch default (not a
+                        // possibly-stale UserDefaults read).
+                        job.isFormatOverridden = (f != store.batchFormat)
                     } label: {
                         Label(f.displayName, systemImage: job.audioFormat == f ? "checkmark" : "")
                     }

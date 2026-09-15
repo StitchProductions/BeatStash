@@ -111,14 +111,14 @@ struct ProbeErrorTests {
         #expect(lines3 == ["[download] done"] && rest3.isEmpty)
     }
 
-    @Test func extractionGateSerializes() async {
+    @Test func extractionGateSerializes() async throws {
         let gate = AsyncSemaphore(limit: 1)
-        await gate.acquire()
+        try await gate.acquire()
         let started = LockedFlag()
         let entered = LockedFlag()
         let waiter = Task {
             started.set()
-            await gate.acquire()
+            try? await gate.acquire()
             entered.set()
             gate.release()
         }
@@ -135,6 +135,32 @@ struct ProbeErrorTests {
         gate.release()
         await waiter.value
         #expect(entered.value)
+    }
+
+    @Test func extractionGateCancelWhileParkedFreesSlot() async throws {
+        enum GateTimeout: Error { case timedOut }
+        let gate = AsyncSemaphore(limit: 1)
+        try await gate.acquire() // hold the only permit
+        let parked = Task { try await gate.acquire() }
+        try? await Task.sleep(nanoseconds: 100_000_000) // let it park
+        parked.cancel()
+        let outcome = await parked.result
+        guard case .failure(let e) = outcome, e is CancellationError else {
+            Issue.record("parked acquire should throw CancellationError")
+            return
+        }
+        gate.release() // free the held permit
+        // Must succeed promptly: a leaked waiter would eat this release and hang.
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { try await gate.acquire() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: 2_000_000_000)
+                throw GateTimeout.timedOut
+            }
+            try await group.next()
+            group.cancelAll()
+        }
+        gate.release()
     }
 
     @Test func probeArgsIgnoreMissingFormats() async {

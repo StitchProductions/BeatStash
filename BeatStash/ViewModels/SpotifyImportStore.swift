@@ -44,6 +44,7 @@ public struct SpotifyImportTrack: Identifiable, Sendable {
 /// scoring, no confidence badges. Review drafts by eye before downloading.
 /// Nothing downloads from here.
 @Observable
+@MainActor
 final class SpotifyImportStore {
     var urlText: String = ""
     var isImporting = false

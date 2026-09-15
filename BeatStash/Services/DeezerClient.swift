@@ -38,10 +38,10 @@ public enum DeezerClient: Sendable {
     }
     private static let store = MemoStore()
 
-    /// Top search hit, or nil (never throws — absence just unanchors scoring).
+    /// Top search hit, or nil (never throws — absence just leaves the
+    /// duration/album anchor empty).
     /// Session memo (10 min): re-imports and auto-retries never re-query the
-    /// same `artist + title`. Final YouTube matches were already memoized;
-    /// this covers the anchor leg too.
+    /// same `artist + title`.
     public static func search(artist: String, title: String) async -> DeezerTrack? {
         let key = "\(artist.lowercased())\0\(title.lowercased())"
         if let hit = await store.get(key) { return hit }

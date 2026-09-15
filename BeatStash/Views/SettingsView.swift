@@ -256,6 +256,7 @@ struct SettingsView: View {
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 280)
                         .font(.callout.monospaced())
+                        .onSubmit { Task { await redetect() } }
                 }
                 HStack {
                     Text("ffmpeg path")
@@ -264,13 +265,10 @@ struct SettingsView: View {
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 280)
                         .font(.callout.monospaced())
+                        .onSubmit { Task { await redetect() } }
                 }
                 Button("Re-detect binaries") {
-                    Task {
-                        await BinaryManager.shared.locate(force: true)
-                        await store.bootstrap()
-                        await refreshToolState()
-                    }
+                    Task { await redetect() }
                 }
             }
 
@@ -311,6 +309,12 @@ struct SettingsView: View {
         if let age = ytAgeDays { s += " · \(age) days old" }
         if let src = ytSource { s += " · \(src.lowercased())" }
         return s
+    }
+
+    private func redetect() async {
+        await BinaryManager.shared.locate(force: true)
+        await store.bootstrap()
+        await refreshToolState()
     }
 
     private func refreshToolState() async {
@@ -404,8 +408,8 @@ struct SettingsView: View {
         panel.canCreateDirectories = true
         panel.prompt = "Choose"
         if panel.runModal() == .OK, let url = panel.url {
+            store.setDestination(url)
             destinationRoot = url.path
-            store.destination = url
         }
     }
 }

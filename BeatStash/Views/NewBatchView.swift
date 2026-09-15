@@ -285,8 +285,7 @@ struct NewBatchView: View {
         panel.canCreateDirectories = true
         panel.prompt = "Choose"
         if panel.runModal() == .OK, let url = panel.url {
-            store.destination = url
-            UserDefaults.standard.set(url.path, forKey: "destinationRoot")
+            store.setDestination(url)
         }
     }
 }
