@@ -78,25 +78,23 @@ struct MediaDecodeTests {
         #expect(entries?.first?.resolvedThumbnail == "https://example.com/a-big.jpg")
     }
 
-    @Test func artlessCachedPlaylistReprobes() async {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("BeatStashTests-\(UUID().uuidString)", isDirectory: true)
-        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    @Test func artlessCachedPlaylistReprobes() async throws {
+        let dir = try TestHelpers.makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         YTDLPService.diskCacheFileOverride = dir.appendingPathComponent("probe-cache.json")
         defer { YTDLPService.diskCacheFileOverride = nil }
-        func writeCache(_ entriesJSON: String) {
-            let at = String(data: try! JSONEncoder().encode(Date()), encoding: .utf8)!
-            try! """
+        func writeCache(_ entriesJSON: String) throws {
+            let at = String(data: try JSONEncoder().encode(Date()), encoding: .utf8)!
+            try """
             {"https://www.youtube.com/playlist?list=PLtest":{"at":\(at),"result":{"kind":"playlist","title":"L","entries":\(entriesJSON)}}}
             """.write(to: YTDLPService.diskCacheFileOverride!, atomically: true, encoding: .utf8)
         }
         // Old-style entry (cached before thumbnails[] support): miss → re-probe.
-        writeCache(#"[{"id":"a","title":"One","playlist_index":1}]"#)
+        try writeCache(#"[{"id":"a","title":"One","playlist_index":1}]"#)
         #expect(await YTDLPService().diskCachedProbe(
             for: "https://www.youtube.com/playlist?list=PLtest") == nil)
         // New-style entry carrying art: hit.
-        writeCache(#"[{"id":"a","title":"One","playlist_index":1,"thumbnails":[{"url":"https://example.com/a.jpg","width":336}]}]"#)
+        try writeCache(#"[{"id":"a","title":"One","playlist_index":1,"thumbnails":[{"url":"https://example.com/a.jpg","width":336}]}]"#)
         let hit = await YTDLPService().diskCachedProbe(
             for: "https://www.youtube.com/playlist?list=PLtest")
         if case .playlist(_, let entries)? = hit {

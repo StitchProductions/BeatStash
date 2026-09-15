@@ -161,10 +161,8 @@ struct SpotifyImportTests {
         #expect(YouTubeMatcher.exactMatchIDs(mbURLs: [], candidates: [a]).isEmpty)
     }
 
-    @Test func matchCacheRoundTripAndTTL() {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("BeatStashTests-\(UUID().uuidString)", isDirectory: true)
-        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    @Test func matchCacheRoundTripAndTTL() throws {
+        let dir = try TestHelpers.makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         YouTubeMatcher.matchCacheFileOverride = dir.appendingPathComponent("match-cache.json")
         defer { YouTubeMatcher.matchCacheFileOverride = nil }

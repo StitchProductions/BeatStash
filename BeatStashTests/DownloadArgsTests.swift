@@ -114,9 +114,7 @@ struct DownloadArgsTests {
     }
 
     @Test func thumbnailResidueCandidates() throws {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("BeatStashTests-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dir = try TestHelpers.makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         func touch(_ name: String, mtime: Date? = nil) throws {
             try Data("x".utf8).write(to: dir.appendingPathComponent(name))
@@ -126,32 +124,34 @@ struct DownloadArgsTests {
                     ofItemAtPath: dir.appendingPathComponent(name).path)
             }
         }
+        // Fixed clock: old files predate `since`, run-born files postdate it.
+        // (Wall-clock `Date()` between touches races FS mtime granularity.)
+        let since = Date(timeIntervalSince1970: 1_750_000_000)
         let output = dir.appendingPathComponent("01 - Title [abc123].wav")
         try Data("audio".utf8).write(to: output)
         // Predates the run: user-placed or ancient residue — must survive.
-        try touch("01 - Title [abc123].png", mtime: Date().addingTimeInterval(-3600))
-        try touch("cover.jpg")
-        try touch("01 - Title [abc123].txt")
-        try touch("02 - Other [zzz].jpg")
-        let since = Date()
+        try touch("01 - Title [abc123].png", mtime: since.addingTimeInterval(-3600))
+        try touch("cover.jpg", mtime: since.addingTimeInterval(-3600))
+        try touch("01 - Title [abc123].txt", mtime: since.addingTimeInterval(-3600))
+        try touch("02 - Other [zzz].jpg", mtime: since.addingTimeInterval(-3600))
         // Born during the run: yt-dlp residue — must be listed.
-        try touch("01 - Title [abc123].jpg")
-        try touch("01 - Title [abc123].webp")
+        try touch("01 - Title [abc123].jpg", mtime: since.addingTimeInterval(10))
+        try touch("01 - Title [abc123].webp", mtime: since.addingTimeInterval(10))
         let found = YTDLPService.thumbnailResidueCandidates(output: output, in: dir, since: since)
             .map(\.lastPathComponent).sorted()
         #expect(found == ["01 - Title [abc123].jpg", "01 - Title [abc123].webp"])
 
         // Uppercase extensions match too. Separate dir: default APFS is
         // case-insensitive, so same-stem upper/lower variants would collide.
-        let dir2 = FileManager.default.temporaryDirectory
-            .appendingPathComponent("BeatStashTests-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir2, withIntermediateDirectories: true)
+        let dir2 = try TestHelpers.makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir2) }
         let output2 = dir2.appendingPathComponent("03 - Upper [u].wav")
         try Data("audio".utf8).write(to: output2)
-        let since2 = Date()
         try Data("x".utf8).write(to: dir2.appendingPathComponent("03 - Upper [u].JPG"))
-        let found2 = YTDLPService.thumbnailResidueCandidates(output: output2, in: dir2, since: since2)
+        try FileManager.default.setAttributes(
+            [.modificationDate: since.addingTimeInterval(10)],
+            ofItemAtPath: dir2.appendingPathComponent("03 - Upper [u].JPG").path)
+        let found2 = YTDLPService.thumbnailResidueCandidates(output: output2, in: dir2, since: since)
             .map(\.lastPathComponent)
         #expect(found2 == ["03 - Upper [u].JPG"])
     }

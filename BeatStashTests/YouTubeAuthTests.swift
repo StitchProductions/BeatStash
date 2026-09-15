@@ -3,12 +3,17 @@ import Testing
 @testable import BeatStash
 
 struct YouTubeAuthTests {
-    private func freshDefaults() -> UserDefaults {
-        UserDefaults(suiteName: "BeatStashTests-\(UUID().uuidString)")!
+    /// Fresh suite plus its name so the test can remove the domain after —
+    /// otherwise every run leaks a plist into ~/Library/Preferences.
+    private func freshDefaults() -> (defaults: UserDefaults, name: String) {
+        let name = "BeatStashTests-\(UUID().uuidString)"
+        return (UserDefaults(suiteName: name)!, name)
     }
 
     @Test func defaultsAreAnonymousWithIPv4On() {
-        let auth = YouTubeAuth.load(defaults: freshDefaults())
+        let (defaults, name) = freshDefaults()
+        defer { defaults.removePersistentDomain(forName: name) }
+        let auth = YouTubeAuth.load(defaults: defaults)
         #expect(auth.cookieMode == .off)
         #expect(!auth.hasCookies)
         #expect(auth.forceIPv4) // measured ~30% faster probes; toggle opts out
@@ -64,7 +69,8 @@ struct YouTubeAuthTests {
     }
 
     @Test func roundTripPersistence() {
-        let defaults = freshDefaults()
+        let (defaults, name) = freshDefaults()
+        defer { defaults.removePersistentDomain(forName: name) }
         var auth = YouTubeAuth()
         auth.cookieMode = .browser
         auth.browser = "chrome"

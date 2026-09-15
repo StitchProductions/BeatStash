@@ -72,9 +72,7 @@ struct DownloadStoreTests {
     }
 
     private func isolatedStoreFiles() throws -> (queue: URL, history: URL) {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("BeatStashTests-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dir = try TestHelpers.makeTempDir()
         return (dir.appendingPathComponent("queue.json"),
                 dir.appendingPathComponent("history.json"))
     }
