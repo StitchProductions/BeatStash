@@ -50,7 +50,7 @@ struct SidebarView: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
                     .truncationMode(.tail)
-                Text("Made possibly by yt-dlp")
+                Text("Made possible by yt-dlp")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
