@@ -266,16 +266,6 @@ if [ "$LIVE" = "1" ]; then
   else
     bad "live deezer anchor"
   fi
-  # MusicBrainz reachability is informational only (strict throttling/503s are
-  # normal) — the client paces, backs off, and degrades silently by contract.
-  if curl -s --max-time 20 -A "BeatStash/1.0 ( smoke-test )" \
-      --get --data-urlencode "query=Despacito" --data-urlencode "fmt=json" \
-      --data-urlencode "limit=1" "https://musicbrainz.org/ws/2/recording/" \
-      | python3 -c "import json,sys; d=json.load(sys.stdin); assert d.get('recordings'), d.get('error', 'no recordings')" 2>/dev/null; then
-    echo "info: musicbrainz reachable"
-  else
-    echo "info: musicbrainz busy/unreachable (expected sometimes — client degrades)"
-  fi
 else
   echo "(live checks skipped — BEATSTASH_LIVE_TESTS=1 to include)"
 fi

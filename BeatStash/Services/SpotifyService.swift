@@ -19,8 +19,8 @@ public struct SpotifyTrack: Sendable, Identifiable {
 /// - Playlist/track IDs parsed from `open.spotify.com` + embed URLs/URIs.
 /// - Playlist content via the embed page (`__NEXT_DATA__` → name + track URIs).
 /// - Per-track metadata via the oEmbed endpoint (title/author/thumbnail).
-/// No durations exist on any keyless surface — anchors come from
-/// Deezer/MusicBrainz, durations from the YouTube candidates themselves.
+/// No durations exist on any keyless surface — anchors come from Deezer,
+/// candidate durations from YouTube itself.
 public enum SpotifyService: Sendable {
     /// 22-char base62 Spotify IDs.
     public nonisolated static func isSpotifyID(_ s: String) -> Bool {

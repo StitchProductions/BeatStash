@@ -70,21 +70,6 @@ struct SpotifyImportTests {
         #expect(t.duration == 228)
     }
 
-    @Test func musicBrainzFixtures() throws {
-        // Shapes per WS2 docs; re-verify against live responses on integration.
-        let env = try JSONDecoder().decode(MBSearchEnvelope.self, from: Data("""
-            {"recordings":[{"id":"mbid-1","title":"Despacito","length":282000,
-             "score":100,"isrcs":["USUM71703825"]}]}
-            """.utf8))
-        #expect(env.recordings?.first?.id == "mbid-1")
-        #expect(env.recordings?.first?.length == 282000)
-        let rels = try JSONDecoder().decode(MBRelationsEnvelope.self, from: Data("""
-            {"relations":[{"url":{"resource":"https://www.youtube.com/watch?v=kJQP7kiw5Fk"}},
-             {"url":{"resource":"https://open.spotify.com/track/x"}}]}
-            """.utf8))
-        #expect(rels.relations?.count == 2)
-    }
-
     // MARK: - Matcher
 
     private func candidate(title: String, uploader: String, duration: Double?) -> PlaylistEntry {
@@ -134,31 +119,6 @@ struct SpotifyImportTests {
         #expect(YouTubeMatcher.videoID(from: "https://www.youtube.com/watch?v=dQw4w9WgXcQ") == "dQw4w9WgXcQ")
         #expect(YouTubeMatcher.videoID(from: "https://youtu.be/dQw4w9WgXcQ") == "dQw4w9WgXcQ")
         #expect(YouTubeMatcher.videoID(from: "not a url") == nil)
-    }
-
-    @Test func adjudicationRule() {
-        // Clear winners skip MusicBrainz entirely.
-        #expect(!YouTubeMatcher.needsAdjudication(best: 0.82, runnerUp: 0.4))
-        #expect(!YouTubeMatcher.needsAdjudication(best: 0.95, runnerUp: nil))
-        // Weak bests always consult.
-        #expect(YouTubeMatcher.needsAdjudication(best: 0.4, runnerUp: 0.1))
-        #expect(YouTubeMatcher.needsAdjudication(best: 0.0, runnerUp: nil))
-        // Close races consult even when strong.
-        #expect(YouTubeMatcher.needsAdjudication(best: 0.85, runnerUp: 0.78))
-        #expect(!YouTubeMatcher.needsAdjudication(best: 0.85, runnerUp: 0.5))
-    }
-
-    @Test func exactReconciliation() {
-        let cands = [
-            candidate(title: "A", uploader: "U", duration: 200),
-            candidate(title: "B", uploader: "U", duration: 200),
-        ]
-        var a = cands[0]; a.id = "dQw4w9WgXcQ"
-        let hit = YouTubeMatcher.exactMatchIDs(
-            mbURLs: ["https://www.youtube.com/watch?v=dQw4w9WgXcQ"],
-            candidates: [a, cands[1]])
-        #expect(hit == ["dQw4w9WgXcQ"])
-        #expect(YouTubeMatcher.exactMatchIDs(mbURLs: [], candidates: [a]).isEmpty)
     }
 
     @Test func matchCacheRoundTripAndTTL() throws {

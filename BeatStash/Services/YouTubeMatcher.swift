@@ -23,10 +23,10 @@ public struct CachedMatch: Codable, Sendable {
     }
 }
 
-/// Spotify → YouTube matching: query building, candidate scoring, and
-/// MusicBrainz exact-URL reconciliation. All pure (`nonisolated`) and
-/// headless-testable; network lives in `YTDLPService.searchYouTube`,
-/// `DeezerClient`, and `MusicBrainzClient`.
+/// Spotify → YouTube matching utilities: query building, candidate
+/// scoring, and the persistent match cache. All pure (`nonisolated`) and
+/// headless-testable; network lives in `YTDLPService.searchYouTube`
+/// and `DeezerClient`.
 ///
 /// Score weights (0...1, auto-select at `autoSelectThreshold`):
 /// token-overlap base + artist-authority bonus + duration-anchor window
@@ -34,15 +34,6 @@ public struct CachedMatch: Codable, Sendable {
 /// routinely run ~60s past the audio (outros), while fakes run 10x long.
 public enum YouTubeMatcher: Sendable {
     public static let autoSelectThreshold = 0.5
-
-    /// MusicBrainz adjudication rule: consult MB only when it can change the
-    /// answer — a weak best, or a close race. Clear winners skip MB entirely
-    /// (each consultation costs 2+ paced requests that usually 503 anyway).
-    /// Pure (tested).
-    nonisolated public static func needsAdjudication(best: Double, runnerUp: Double?) -> Bool {
-        if best < 0.7 { return true }
-        return (best - (runnerUp ?? 0)) < 0.15
-    }
 
     /// Match outcomes live 30 days: recordings don't move. Failures are never
     /// cached (transient by nature).
@@ -94,7 +85,7 @@ public enum YouTubeMatcher: Sendable {
             .joined(separator: " ")
     }
 
-    /// YouTube video ID from watch/shorts/embed/youtu.be URLs (for MB reconciliation).
+    /// YouTube video ID from watch/shorts/embed/youtu.be URLs.
     nonisolated public static func videoID(from youtubeURL: String) -> String? {
         guard let u = URL(string: youtubeURL) else { return nil }
         if u.host?.contains("youtu.be") == true {
@@ -105,17 +96,8 @@ public enum YouTubeMatcher: Sendable {
             .queryItems?.first(where: { $0.name == "v" })?.value
     }
 
-    /// Candidate entry IDs that exactly match curated MusicBrainz URLs.
-    nonisolated public static func exactMatchIDs(
-        mbURLs: [String], candidates: [PlaylistEntry]
-    ) -> Set<String> {
-        let ids = Set(mbURLs.compactMap { videoID(from: $0) })
-        guard !ids.isEmpty else { return [] }
-        return Set(candidates.map(\.id).filter { ids.contains($0) })
-    }
-
-    /// Composite score. `anchorDuration` = Deezer ?? MusicBrainz seconds (nil
-    /// when unanchored — title/channel signals alone).
+    /// Composite score. `anchorDuration` = Deezer seconds (nil when
+    /// unanchored — title/channel signals alone).
     nonisolated public static func score(
         artist: String, title: String,
         anchorDuration: Double?,
