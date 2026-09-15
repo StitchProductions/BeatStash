@@ -117,7 +117,9 @@ struct NewBatchView: View {
                     Spacer()
 
                     if store.isFetching {
-                        ProgressView().scaleEffect(0.8)
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .controlSize(.small)
                         Text("\(store.fetchProgress ?? "Fetching info…") (Cancel with ⌘.)").foregroundStyle(.secondary)
                         Button("Cancel") { store.cancelFetch() }
                             .buttonStyle(.link)

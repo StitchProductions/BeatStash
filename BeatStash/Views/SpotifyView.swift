@@ -54,7 +54,9 @@ struct SpotifyView: View {
 
                 HStack {
                     if imports.isImporting {
-                        ProgressView().scaleEffect(0.8)
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .controlSize(.small)
                         Text(imports.progress ?? "Working…").foregroundStyle(.secondary)
                         Button("Cancel") { imports.cancelImport() }
                             .buttonStyle(.link)

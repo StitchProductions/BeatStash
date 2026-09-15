@@ -120,7 +120,12 @@ struct QueueRowView: View {
         case .queued:
             Image(systemName: "clock").foregroundStyle(.secondary)
         case .fetching, .tagging:
-            ProgressView().scaleEffect(0.7)
+            // Native small spinner: a scaleEffect here trips the AppKit
+            // bridge's min <= max check on every row re-render (console spam
+            // during downloads) for the same visual size.
+            ProgressView()
+                .progressViewStyle(.circular)
+                .controlSize(.small)
         case .downloading:
             Image(systemName: "arrow.down.circle.fill").foregroundStyle(.tint)
         case .completed:
