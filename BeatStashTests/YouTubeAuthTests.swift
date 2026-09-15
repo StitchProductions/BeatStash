@@ -5,13 +5,14 @@ import Testing
 struct YouTubeAuthTests {
     /// Fresh suite plus its name so the test can remove the domain after —
     /// otherwise every run leaks a plist into ~/Library/Preferences.
-    private func freshDefaults() -> (defaults: UserDefaults, name: String) {
+    private func freshDefaults() throws -> (defaults: UserDefaults, name: String) {
         let name = "BeatStashTests-\(UUID().uuidString)"
-        return (UserDefaults(suiteName: name)!, name)
+        let defaults = try #require(UserDefaults(suiteName: name))
+        return (defaults, name)
     }
 
-    @Test func defaultsAreAnonymousWithIPv4On() {
-        let (defaults, name) = freshDefaults()
+    @Test func defaultsAreAnonymousWithIPv4On() throws {
+        let (defaults, name) = try freshDefaults()
         defer { defaults.removePersistentDomain(forName: name) }
         let auth = YouTubeAuth.load(defaults: defaults)
         #expect(auth.cookieMode == .off)
@@ -68,8 +69,8 @@ struct YouTubeAuthTests {
         #expect(YouTubeAuth.networkArgs.contains("--retries"))
     }
 
-    @Test func roundTripPersistence() {
-        let (defaults, name) = freshDefaults()
+    @Test func roundTripPersistence() throws {
+        let (defaults, name) = try freshDefaults()
         defer { defaults.removePersistentDomain(forName: name) }
         var auth = YouTubeAuth()
         auth.cookieMode = .browser

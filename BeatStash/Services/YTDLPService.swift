@@ -296,7 +296,7 @@ public actor YTDLPService: Sendable {
                         }
                         let result = ProbeResult.playlist(title: title, entries: entries)
                         await self.cacheProbePersisting(key: key, result: result)
-                        Self.log.info("probe playlist: \(entries.count, privacy: .public) entries, chain \(i, privacy: .public), \(String(format: "%.1f", Date().timeIntervalSince(start)), privacy: .public)s: \(key, privacy: .public)")
+                        Self.log.debug("probe playlist: \(entries.count, privacy: .public) entries, chain \(i, privacy: .public), \(String(format: "%.1f", Date().timeIntervalSince(start)), privacy: .public)s: \(key, privacy: .public)")
                         return result
                     }
                     // List URL that resolved to a single video → fall through.
@@ -324,7 +324,7 @@ public actor YTDLPService: Sendable {
                 )
                 let result = ProbeResult.single(found.media)
                 await self.cacheProbePersisting(key: key, result: result, raw: found.raw)
-                Self.log.info("probe single: chain \(i, privacy: .public), \(String(format: "%.1f", Date().timeIntervalSince(start)), privacy: .public)s: \(key, privacy: .public)")
+                Self.log.debug("probe single: chain \(i, privacy: .public), \(String(format: "%.1f", Date().timeIntervalSince(start)), privacy: .public)s: \(key, privacy: .public)")
                 return result
             } catch is CancellationError {
                 throw CancellationError()
@@ -346,56 +346,6 @@ public actor YTDLPService: Sendable {
     public nonisolated static func isListURL(_ url: String) -> Bool {
         let lower = url.lowercased()
         return lower.contains("list=") || lower.contains("/playlist")
-    }
-
-    /// Search-retry policy: bot-wall and network classes clear by themselves;
-    /// everything else fails the track immediately. Pure (tested).
-    nonisolated static func isSearchRetryable(_ error: Error) -> Bool {
-        guard let e = error as? ServiceError else { return false }
-        switch e {
-        case .botCheck, .networkError, .probeTimeout:
-            return true
-        default:
-            return false
-        }
-    }
-
-    /// YouTube search for import matching: flat `ytsearchN:` results with
-    /// id/title/duration/uploader (no formats, no player dance beyond the
-    /// standard hardening). Serial callers only — search throttles like
-    /// extractions (measured 3-parallel slower than serial).
-    ///
-    /// Bot-wall (403) and network failures retry with backoff (5s, 15s);
-    /// anything else throws immediately. Callers add inter-search pacing.
-    public func searchYouTube(query: String, limit: Int = 5) async throws -> [PlaylistEntry] {
-        guard let ytDlp = await binaries.ytDlpPath else { throw ServiceError.missingBinary }
-        try Task.checkCancellation()
-        let args = YouTubeAuth.networkArgs
-            + ["--flat-playlist", "--dump-json", "--no-warnings",
-               "ytsearch\(max(1, min(limit, 10))):\(query)"]
-        var lastError: Error = ServiceError.downloadFailed("search failed")
-        for attempt in 0...2 {
-            if attempt > 0 {
-                try Task.checkCancellation()
-                Self.log.info("search retry \(attempt, privacy: .public)/2 after backoff: \(query.prefix(40), privacy: .public)")
-                // ±20% jitter so concurrent jobs don't retry in lockstep.
-                let base = Double([5, 15][attempt - 1])
-                let delay = base * Double.random(in: 0.8...1.2)
-                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-            }
-            do {
-                let out = try await runCapture(exe: ytDlp, args: args, timeout: 45)
-                guard out.exitCode == 0 else { throw Self.classifyProbeError(stderr: out.stderr) }
-                return await Self.parseFlatEntries(from: out.stdout) ?? []
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                lastError = error
-                if Self.isSearchRetryable(error), attempt < 2 { continue }
-                throw error
-            }
-        }
-        throw lastError
     }
 
     /// Returns entries for playlists, `nil` for single videos.
@@ -709,7 +659,7 @@ public actor YTDLPService: Sendable {
             } catch {
                 lastError = error
                 if Self.shouldRetryDownloadChain(error: error, attemptsLeft: chains.count - 1 - i) {
-                    Self.log.info("download chain \(i, privacy: .public) failed, trying next: \(job.url, privacy: .public)")
+                    Self.log.debug("download chain \(i, privacy: .public) failed, trying next: \(job.url, privacy: .public)")
                     continue
                 }
                 throw error

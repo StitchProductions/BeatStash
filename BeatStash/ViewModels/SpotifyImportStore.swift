@@ -328,34 +328,42 @@ final class SpotifyImportStore {
 
     /// `ytsearch1:` query URL for a resolved row. New Batch probes it like
     /// any other URL and lands on the first YouTube result — first result
-    /// wins by design (no scoring here).
+    /// wins by design (no scoring here). Blank queries yield "" and are
+    /// skipped by handoff (a resolved row always has a title, defensively).
+    /// Queries pass through verbatim (argv, no shell): "AC/DC", "&", "?"
+    /// need no escaping.
     nonisolated static func searchURL(artist: String, title: String) -> String {
         let q = "\(artist) \(title)".trimmingCharacters(in: .whitespaces)
-        return "ytsearch1:\(q.isEmpty ? title : q)"
+        guard !q.isEmpty else { return "" }
+        return "ytsearch1:\(q)"
     }
 
     /// Appends selected resolved rows to the download drafts
     /// (Spotify-sourced tags, playlist name as album) and returns how many
     /// were added. Draft durations come from the Deezer anchor; anything
-    /// missing shows "–" until New Batch fetch enriches it.
+    /// missing shows "–" until New Batch fetch enriches it. Added rows are
+    /// deselected, so a second press adds nothing (re-tick to duplicate
+    /// deliberately).
     @discardableResult
     func addSelectedToBatch(_ store: DownloadStore) -> Int {
         // Only resolved rows are addable — Select-all no longer ticks
         // .working/.failed, but filter defensively so the count returned
         // always equals the rows actually appended.
-        let picked = tracks.filter { $0.selected && $0.isResolved }
-        guard !picked.isEmpty else { return 0 }
         let wasEmpty = store.draftJobs.isEmpty
         var added = 0
-        for t in picked {
+        var firstTitle: String?
+        for i in tracks.indices where tracks[i].selected && tracks[i].isResolved {
+            let t = tracks[i]
             guard case .resolved = t.status else { continue }
+            let url = Self.searchURL(artist: t.artist, title: t.title)
+            guard !url.isEmpty else { continue }
             let album = playlistTitle ?? t.deezerAlbum
             let tags = TagParser.parse(
                 title: t.title, uploader: t.artist,
                 playlistTitle: album, playlistIndex: album != nil ? added + 1 : nil,
                 uploadDate: nil)
             store.draftJobs.append(DownloadJob(
-                url: Self.searchURL(artist: t.artist, title: t.title),
+                url: url,
                 kind: store.batchMode,
                 displayTitle: t.title,
                 thumbnailURL: t.artworkURL,
@@ -364,14 +372,15 @@ final class SpotifyImportStore {
                 audioFormat: store.batchFormat,
                 videoQuality: store.videoQuality,
                 tags: tags))
+            tracks[i].selected = false
+            if firstTitle == nil { firstTitle = t.title }
             added += 1
         }
+        guard added > 0 else { return 0 }
         if wasEmpty {
-            store.probeTitle = playlistTitle ?? picked.first?.title
+            store.probeTitle = playlistTitle ?? firstTitle
         }
-        if added > 0 {
-            NotificationCenter.default.post(name: .beatStashShowNewBatch, object: nil)
-        }
+        NotificationCenter.default.post(name: .beatStashShowNewBatch, object: nil)
         return added
     }
 }

@@ -11,6 +11,9 @@
 #   another Mac, right-click the app → Open to pass Gatekeeper.
 set -eu
 
+# Single source of truth for the release version is MARKETING_VERSION in
+# BeatStash.xcodeproj (Info.plist + sidebar footer read it at runtime).
+# Keep this default in sync on version bumps, or pass --version explicitly.
 VERSION="1.0.0"
 BUILD=1
 OPEN_DMG=0

@@ -18,19 +18,6 @@ struct ProbeErrorTests {
         if case .botCheck = e {} else { Issue.record("expected botCheck") }
     }
 
-    @Test func searchRetryPolicy() {
-        for e: YTDLPService.ServiceError in
-            [.botCheck("x"), .networkError("x"), .probeTimeout(1)] {
-            #expect(YTDLPService.isSearchRetryable(e))
-        }
-        for e: YTDLPService.ServiceError in
-            [.loginRequired("x"), .videoUnavailable("x"), .formatGated("x"),
-             .parseFailed("x"), .missingBinary] {
-            #expect(!YTDLPService.isSearchRetryable(e))
-        }
-        #expect(!YTDLPService.isSearchRetryable(NSError(domain: "x", code: 1)))
-    }
-
     @Test func loginRequired() {
         let e = YTDLPService.classifyProbeError(stderr: "ERROR: Private video. Login required.")
         if case .loginRequired = e {} else { Issue.record("expected loginRequired") }
@@ -127,12 +114,22 @@ struct ProbeErrorTests {
     @Test func extractionGateSerializes() async {
         let gate = AsyncSemaphore(limit: 1)
         await gate.acquire()
+        let started = LockedFlag()
         let entered = LockedFlag()
         let waiter = Task {
+            started.set()
             await gate.acquire()
             entered.set()
             gate.release()
         }
+        // Wait until the waiter is provably parked on acquire (deadline, not
+        // a blind sleep — on loaded CI the task may start late, which used
+        // to make the assertion vacuous).
+        let deadline = Date().addingTimeInterval(5)
+        while !started.value, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        #expect(started.value) // waiter running; a timeout here is the failure
         try? await Task.sleep(nanoseconds: 50_000_000)
         #expect(!entered.value) // second acquirer blocks while held
         gate.release()

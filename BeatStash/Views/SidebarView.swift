@@ -56,6 +56,12 @@ struct SidebarView: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
                     .truncationMode(.tail)
+                if let version = Self.appVersionString {
+                    Text(version)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
                 if !store.binariesReady {
                     Text("Setup needed")
                         .font(.caption2)
@@ -66,5 +72,18 @@ struct SidebarView: View {
             .padding(.horizontal)
             .padding(.vertical, 8)
         }
+    }
+
+    /// "v1.0.0 (1)" from the generated Info.plist (MARKETING_VERSION +
+    /// CURRENT_PROJECT_VERSION) — tracks releases with no maintenance.
+    /// Nil in previews/tests where the host bundle has no such keys.
+    private static var appVersionString: String? {
+        guard let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        else { return nil }
+        if let b = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
+           !b.isEmpty {
+            return "v\(v) (\(b))"
+        }
+        return "v\(v)"
     }
 }

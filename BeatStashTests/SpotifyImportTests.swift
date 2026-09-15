@@ -70,88 +70,18 @@ struct SpotifyImportTests {
         #expect(t.duration == 228)
     }
 
-    // MARK: - Matcher
-
-    private func candidate(title: String, uploader: String, duration: Double?) -> PlaylistEntry {
-        PlaylistEntry(id: "v-\(title.prefix(4))", title: title, url: nil,
-                      duration: duration, thumbnail: nil, uploader: uploader,
-                      playlistIndex: nil, playlistTitle: nil)
-    }
-
-    @Test func exactMatchScoresHigh() {
-        let s = YouTubeMatcher.score(
-            artist: "Luis Fonsi", title: "Despacito", anchorDuration: 228,
-            candidate: candidate(title: "Luis Fonsi - Despacito ft. Daddy Yankee",
-                                 uploader: "Luis Fonsi", duration: 282))
-        #expect(s >= YouTubeMatcher.autoSelectThreshold)
-    }
-
-    @Test func loopDecoyRejected() {
-        let s = YouTubeMatcher.score(
-            artist: "Luis Fonsi", title: "Despacito", anchorDuration: 228,
-            candidate: candidate(title: "Despacito 1 Hour Loop", uploader: "Random",
-                                 duration: 3600))
-        #expect(s < YouTubeMatcher.autoSelectThreshold)
-    }
-
-    @Test func wrongSongScoresZero() {
-        let s = YouTubeMatcher.score(
-            artist: "Luis Fonsi", title: "Despacito", anchorDuration: 228,
-            candidate: candidate(title: "Shape of You", uploader: "Ed Sheeran",
-                                 duration: 263))
-        #expect(s < 0.2)
-    }
-
-    @Test func unanchoredStillWorks() {
-        let s = YouTubeMatcher.score(
-            artist: "Queen", title: "Bohemian Rhapsody", anchorDuration: nil,
-            candidate: candidate(title: "Queen – Bohemian Rhapsody (Official Video)",
-                                 uploader: "Queen Official", duration: 360))
-        #expect(s >= YouTubeMatcher.autoSelectThreshold)
-    }
-
-    @Test func queryAndNorm() {
-        #expect(YouTubeMatcher.query(artist: "Luis Fonsi", title: "Despacito") == "Luis Fonsi Despacito")
-        #expect(YouTubeMatcher.norm("Hello (Official Video)") == "hello")
-    }
-
-    @Test func videoIDExtraction() {
-        #expect(YouTubeMatcher.videoID(from: "https://www.youtube.com/watch?v=dQw4w9WgXcQ") == "dQw4w9WgXcQ")
-        #expect(YouTubeMatcher.videoID(from: "https://youtu.be/dQw4w9WgXcQ") == "dQw4w9WgXcQ")
-        #expect(YouTubeMatcher.videoID(from: "not a url") == nil)
-    }
-
-    @Test func matchCacheRoundTripAndTTL() throws {
-        let dir = try TestHelpers.makeTempDir()
-        defer { try? FileManager.default.removeItem(at: dir) }
-        YouTubeMatcher.matchCacheFileOverride = dir.appendingPathComponent("match-cache.json")
-        defer { YouTubeMatcher.matchCacheFileOverride = nil }
-
-        #expect(YouTubeMatcher.readMatchCache().isEmpty)
-        let fresh = CachedMatch(youtubeID: "abc123XYZ_-", score: 0.87,
-                                youtubeTitle: "T", duration: 200, exact: false)
-        YouTubeMatcher.writeMatchCache(["spotify:track1": fresh])
-        let back = YouTubeMatcher.readMatchCache()
-        #expect(back["spotify:track1"]?.youtubeID == "abc123XYZ_-")
-        #expect(back["spotify:track1"]?.score == 0.87)
-
-        // Expired entries prune on read.
-        var stale = back
-        stale["old"] = CachedMatch(youtubeID: "z", score: 1, youtubeTitle: "O",
-                                   duration: nil, exact: true,
-                                   at: Date(timeIntervalSince1970: 0))
-        YouTubeMatcher.writeMatchCache(stale)
-        let pruned = YouTubeMatcher.readMatchCache()
-        #expect(pruned["old"] == nil)
-        #expect(pruned["spotify:track1"] != nil)
-    }
-
     // MARK: - Handoff search URLs (first result wins, no scoring)
 
     @Test func searchURLShapes() {
         #expect(SpotifyImportStore.searchURL(artist: "Adele", title: "Hello") == "ytsearch1:Adele Hello")
         #expect(SpotifyImportStore.searchURL(artist: "", title: "Hello") == "ytsearch1:Hello")
         #expect(SpotifyImportStore.searchURL(artist: "  ", title: "  Hello  ") == "ytsearch1:Hello")
+        // Blank queries are skipped by handoff — never a bare "ytsearch1:".
+        #expect(SpotifyImportStore.searchURL(artist: "", title: "") == "")
+        #expect(SpotifyImportStore.searchURL(artist: "  ", title: "  ") == "")
+        // Reserved chars pass through verbatim (argv, no shell escaping).
+        #expect(SpotifyImportStore.searchURL(artist: "AC/DC", title: "Hells Bells") == "ytsearch1:AC/DC Hells Bells")
+        #expect(SpotifyImportStore.searchURL(artist: "A&B", title: "C? D") == "ytsearch1:A&B C? D")
     }
 
 }

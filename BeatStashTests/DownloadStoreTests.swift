@@ -69,6 +69,9 @@ struct DownloadStoreTests {
         #expect(DownloadStore.decodeQueue(from: Data("not json".utf8)) == nil)
         #expect(DownloadStore.decodeQueue(from: Data("{\"version\":99,\"jobs\":[]}".utf8)) == nil)
         #expect(DownloadStore.decodeQueue(from: Data("{\"version\":1,\"jobs\":[]}".utf8))?.isEmpty == true)
+        // Wrong-typed or keyless jobs fail the whole envelope soft, too.
+        #expect(DownloadStore.decodeQueue(from: Data("{\"version\":1,\"jobs\":\"nope\"}".utf8)) == nil)
+        #expect(DownloadStore.decodeQueue(from: Data("{\"version\":1,\"jobs\":[{}]}".utf8)) == nil)
     }
 
     private func isolatedStoreFiles() throws -> (queue: URL, history: URL) {
@@ -170,5 +173,53 @@ struct DownloadStoreTests {
         // Newest completion on top, matching completion-time ordering.
         #expect(store.history.map(\.title) == ["Second", "First"])
         #expect(!store.history.map(\.title).contains("Bad"))
+    }
+
+    @Test func searchURLJobSurvivesRelaunch() throws {
+        let dir = try isolateStores()
+        defer {
+            DownloadStore.queueFileOverride = nil
+            DownloadStore.historyFileOverride = nil
+            try? FileManager.default.removeItem(at: dir)
+        }
+        // Spotify handoff drafts carry ytsearch1: URLs — the queue must
+        // persist them verbatim for New Batch to resolve at fetch time.
+        var job = queuedJob("Hello", status: .queued)
+        job.url = "ytsearch1:Adele Hello"
+        job.audioFormat = .mp3
+        let store = DownloadStore()
+        store.queue = [job]
+        store.clearFinished() // nothing finished: persists queue as-is
+        let relaunched = DownloadStore()
+        #expect(relaunched.queue.count == 1)
+        #expect(relaunched.queue.first?.url == "ytsearch1:Adele Hello")
+        #expect(relaunched.queue.first?.status == .queued)
+        #expect(relaunched.queue.first?.audioFormat == .mp3)
+    }
+
+    @Test func relaunchMidRetryRequeuesClean() throws {
+        let dir = try isolateStores()
+        defer {
+            DownloadStore.queueFileOverride = nil
+            DownloadStore.historyFileOverride = nil
+            try? FileManager.default.removeItem(at: dir)
+        }
+        // Killed mid auto-retry: live progress + the attempt note on disk.
+        var retrying = queuedJob("Retry", status: .downloading)
+        retrying.progress = 0.4
+        retrying.phaseLabel = "Preparing…"
+        retrying.speedString = "1MiB/s"
+        retrying.errorMessage = "Auto-retrying (attempt 2/3)…"
+        let store = DownloadStore()
+        store.queue = [retrying]
+        store.clearFinished() // persists queue as-is
+        // Fresh launch: load sanitizes live state, resume requeues fresh.
+        // (normalize never pumps, so this spawns no downloads.)
+        let relaunched = DownloadStore()
+        #expect(relaunched.queue.first?.progress == 0)
+        #expect(relaunched.queue.first?.phaseLabel == nil)
+        #expect(relaunched.normalizeQueueForResume())
+        #expect(relaunched.queue.first?.status == .queued)
+        #expect(relaunched.queue.first?.errorMessage == nil)
     }
 }

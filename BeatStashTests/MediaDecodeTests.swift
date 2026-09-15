@@ -84,10 +84,13 @@ struct MediaDecodeTests {
         YTDLPService.diskCacheFileOverride = dir.appendingPathComponent("probe-cache.json")
         defer { YTDLPService.diskCacheFileOverride = nil }
         func writeCache(_ entriesJSON: String) throws {
-            let at = String(data: try JSONEncoder().encode(Date()), encoding: .utf8)!
+            // An hour ago: always inside the 7-day TTL, never a wall-clock race.
+            let stamp = Date(timeIntervalSinceNow: -3600)
+            let at = try #require(String(data: try JSONEncoder().encode(stamp), encoding: .utf8))
+            let file = try #require(YTDLPService.diskCacheFileOverride)
             try """
             {"https://www.youtube.com/playlist?list=PLtest":{"at":\(at),"result":{"kind":"playlist","title":"L","entries":\(entriesJSON)}}}
-            """.write(to: YTDLPService.diskCacheFileOverride!, atomically: true, encoding: .utf8)
+            """.write(to: file, atomically: true, encoding: .utf8)
         }
         // Old-style entry (cached before thumbnails[] support): miss → re-probe.
         try writeCache(#"[{"id":"a","title":"One","playlist_index":1}]"#)
@@ -109,9 +112,9 @@ struct MediaDecodeTests {
         #expect(YTDLPService.parseFlatEntries(from: "") == nil)
     }
 
-    @Test func flatEntryThumbnailsArrayResolves() {
+    @Test func flatEntryThumbnailsArrayResolves() throws {
         // Real `--flat-playlist` shape: plural `thumbnails[]`, no singular key.
-        let e = try! JSONDecoder().decode(PlaylistEntry.self, from: Data("""
+        let e = try JSONDecoder().decode(PlaylistEntry.self, from: Data("""
             {"id":"ekr2nIex040","title":"APT.","playlist_title":"Pop",
              "playlist_index":1,
              "thumbnails":[{"url":"https://i.ytimg.com/vi/ekr2nIex040/hqdefault.jpg","width":168,"height":94},
@@ -121,31 +124,31 @@ struct MediaDecodeTests {
         #expect(e.resolvedThumbnail == "https://i.ytimg.com/vi/ekr2nIex040/maxresdefault.jpg")
     }
 
-    @Test func singularThumbnailWinsOverArray() {
-        let e = try! JSONDecoder().decode(PlaylistEntry.self, from: Data("""
+    @Test func singularThumbnailWinsOverArray() throws {
+        let e = try JSONDecoder().decode(PlaylistEntry.self, from: Data("""
             {"id":"x","thumbnail":"https://example.com/single.jpg",
              "thumbnails":[{"url":"https://example.com/big.jpg","width":640}]}
             """.utf8))
         #expect(e.resolvedThumbnail == "https://example.com/single.jpg")
     }
 
-    @Test func dimensionlessThumbnailsResolveToLast() {
-        let e = try! JSONDecoder().decode(PlaylistEntry.self, from: Data("""
+    @Test func dimensionlessThumbnailsResolveToLast() throws {
+        let e = try JSONDecoder().decode(PlaylistEntry.self, from: Data("""
             {"id":"x","thumbnails":[{"url":"https://example.com/a.jpg"},
                                     {"url":"https://example.com/b.jpg"}]}
             """.utf8))
         #expect(e.resolvedThumbnail == "https://example.com/b.jpg")
     }
 
-    @Test func noThumbnailsResolvesNil() {
-        let e = try! JSONDecoder().decode(PlaylistEntry.self, from: Data("""
+    @Test func noThumbnailsResolvesNil() throws {
+        let e = try JSONDecoder().decode(PlaylistEntry.self, from: Data("""
             {"id":"x","title":"T"}
             """.utf8))
         #expect(e.resolvedThumbnail == nil)
     }
 
-    @Test func mediaInfoThumbnailsArrayResolves() {
-        let m = try! JSONDecoder().decode(MediaInfo.self, from: Data("""
+    @Test func mediaInfoThumbnailsArrayResolves() throws {
+        let m = try JSONDecoder().decode(MediaInfo.self, from: Data("""
             {"id":"x","thumbnails":[{"url":"https://example.com/a.jpg","width":120}]}
             """.utf8))
         #expect(m.resolvedThumbnail == "https://example.com/a.jpg")

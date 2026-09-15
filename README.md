@@ -9,22 +9,6 @@ Turn YouTube links and Spotify playlists into a tagged local music library — o
 ![macOS 15+](https://img.shields.io/badge/macOS-15%2B-blue.svg)
 ![Release](https://img.shields.io/github/v/release/StitchProductions/BeatStash)
 
-## Screenshots
-
-| New Batch | Queue |
-|---|---|
-| ![New Batch — screenshot coming soon](docs/screenshots/new-batch.png) | ![Queue — screenshot coming soon](docs/screenshots/queue.png) |
-
-| History | Spotify |
-|---|---|
-| ![History — screenshot coming soon](docs/screenshots/history.png) | ![Spotify — screenshot coming soon](docs/screenshots/spotify.png) |
-
-| Settings |
-|---|
-| ![Settings — screenshot coming soon](docs/screenshots/settings.png) |
-
-> Screenshots land here as `docs/screenshots/<tab>.png` — same filenames, no README edits needed.
-
 ## What it does
 
 - **New Batch** — paste YouTube links or bare video IDs (one per line, comma- or space-separated), probe them, then Fetch info or Download. Playlists, Shorts, and single videos supported.
@@ -59,13 +43,13 @@ scripts/package-dmg.sh --version 1.0.0   # → dist/BeatStash-1.0.0.dmg
 
 ## Tests
 
-115 tests across 12 suites (`BeatStashTests/`), run on every push via GitHub Actions — see the badge above. Run them locally:
+100+ tests across 12 suites (`BeatStashTests/`), run on every push via GitHub Actions — see the badge above. Run them locally:
 
 ```sh
 xcodebuild test -scheme BeatStash -destination 'platform=macOS'
 ```
 
-Suites cover URL/Spotify-link parsing, tag parsing, YouTube matching + cache TTL, probe-error classification and retry chains, download argument building, auth/client chains, oEmbed shapes, and version comparison. A headless end-to-end smoke test lives in `scripts/smoke-test.sh`.
+Suites cover URL/Spotify-link parsing, tag parsing, handoff search URLs, probe-error classification and retry chains, download argument building, auth/client chains, oEmbed shapes, and version comparison. A headless end-to-end smoke test lives in `scripts/smoke-test.sh`.
 
 ## Credits
 

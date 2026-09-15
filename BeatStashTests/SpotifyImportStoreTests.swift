@@ -58,5 +58,8 @@ struct SpotifyImportStoreTests {
         #expect(draft.artworkURL == "https://example.com/a.jpg")
         #expect(draft.tags.album == "Some Playlist")
         #expect(store.probeTitle == "Some Playlist")
+        // Added rows deselect: a second press is a no-op (re-tick to dup).
+        #expect(imports.addSelectedToBatch(store) == 0)
+        #expect(store.draftJobs.count == 1)
     }
 }

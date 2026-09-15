@@ -42,8 +42,8 @@ struct OEmbedTests {
         #expect(YTDLPService.oEmbedURL(for: "https://example.com/x") != nil)
     }
 
-    @Test func draftMapping() {
-        let video = try! decodeVideo(#"{"title":"Adele - Hello (Official Music Video)","author_name":"AdeleVEVO"}"#)
+    @Test func draftMapping() throws {
+        let video = try decodeVideo(#"{"title":"Adele - Hello (Official Music Video)","author_name":"AdeleVEVO"}"#)
         let job = DownloadStore.draftFromOEmbed(
             url: "https://www.youtube.com/watch?v=YQHsXMglC9A", video: video,
             format: .mp3, quality: .hd1080p, mode: .audio)
@@ -54,8 +54,8 @@ struct OEmbedTests {
         #expect(job.kind == .audio)
     }
 
-    @Test func draftMappingKeepsUntitledEdge() {
-        let video = try! decodeVideo(#"{"title":"(Official Video)","author_name":"U"}"#)
+    @Test func draftMappingKeepsUntitledEdge() throws {
+        let video = try decodeVideo(#"{"title":"(Official Video)","author_name":"U"}"#)
         let job = DownloadStore.draftFromOEmbed(
             url: "https://example.com/x", video: video,
             format: .m4a, quality: .hd1080p, mode: .audio)
