@@ -59,6 +59,7 @@ final class DownloadStore {
         maxConcurrent = UserDefaults.standard.integer(forKey: "maxConcurrent")
         if maxConcurrent <= 0 { maxConcurrent = 3 }
         loadHistory()
+        loadQueue()
     }
 
     // MARK: - Setup
@@ -96,6 +97,7 @@ final class DownloadStore {
     func continueOffline() {
         backendError = nil
         backendReady = true
+        restoreQueueAndResume()
         Task { await bootstrap() }
     }
 
@@ -135,9 +137,11 @@ final class DownloadStore {
             }
             await bootstrap()
             backendReady = true
+            restoreQueueAndResume()
         } else {
             await bootstrap() // fast: cached check + shared version memo
             backendReady = true
+            restoreQueueAndResume()
             Task { await refreshCurrencyInBackground() }
         }
     }
@@ -219,6 +223,21 @@ final class DownloadStore {
         // performFetch's catch resets isFetching; fast-path it in case
         // the probe already returned between cancel and termination.
         if isFetching { isFetching = false }
+    }
+
+    /// Clears fetched drafts (Clear list button). Pasted links stay so the
+    /// batch can be edited and re-fetched; destination, format, queue, and
+    /// history are untouched. Any in-flight fetch is cancelled and orphaned
+    /// via a fresh session so late Tier-2 publishes can't repopulate the list.
+    func clearDrafts() {
+        cancelFetch()
+        fetchTask = nil
+        fetchSession = UUID()
+        isFetching = false
+        fetchProgress = nil
+        fetchError = nil
+        draftJobs = []
+        probeTitle = nil
     }
 
     /// One-tap Download: instant drafts (disk/oEmbed, ~1s), enqueue everything
@@ -683,6 +702,7 @@ final class DownloadStore {
         }
         // Clear draft selection to avoid double-enqueue.
         for i in draftJobs.indices { draftJobs[i].selected = false }
+        saveQueue()
         pump()
     }
 
@@ -694,6 +714,7 @@ final class DownloadStore {
         queue[i].errorMessage = nil
         transientFailures.removeValue(forKey: id)
         stopPreparingTicker(id)
+        saveQueue()
         pump()
     }
 
@@ -707,6 +728,7 @@ final class DownloadStore {
                 queue[i].status = .cancelled
             }
         }
+        saveQueue()
         pump()
     }
 
@@ -720,10 +742,28 @@ final class DownloadStore {
         for i in queue.indices where queue[i].status.isActive {
             queue[i].status = .cancelled
         }
+        saveQueue()
     }
 
+    /// Clears finished rows at the user's request. Completed rows move into
+    /// history here — not at download time — so a relaunch never loses them
+    /// before they've been seen; failed/cancelled rows are dropped silently.
     func clearFinished() {
+        for job in queue.filter({ $0.status == .completed }) {
+            history.insert(HistoryEntry(
+                title: job.tags.title.isEmpty ? job.displayTitle : job.tags.title,
+                artist: job.tags.artist,
+                url: job.url,
+                format: job.kind == .audio ? job.audioFormat.rawValue : job.videoQuality.rawValue,
+                filePath: job.outputPath ?? "",
+                thumbnailURL: job.thumbnailURL
+            ), at: 0)
+        }
+        let cleared = queue.filter { $0.status.isFinished }.map(\.id)
         queue.removeAll { $0.status.isFinished }
+        for id in cleared { transientFailures.removeValue(forKey: id) }
+        saveHistory()
+        saveQueue()
     }
 
     var activeCount: Int { queue.filter { $0.status.isActive }.count }
@@ -778,6 +818,53 @@ final class DownloadStore {
         }
     }
 
+    /// Relaunch status mapping. Nil = stays as-is (already queued rows just
+    /// need pump; cancelled/completed wait for the user). Interrupted work
+    /// and failed rows requeue. Pure (tested).
+    nonisolated static func restoredStatus(for status: JobStatus) -> JobStatus? {
+        switch status {
+        case .downloading, .tagging, .fetching, .failed:
+            return .queued
+        case .pending, .queued, .cancelled, .completed:
+            return nil
+        }
+    }
+
+    /// Launch recovery runs once (a repeat must never yank running downloads
+    /// back to queued).
+    private var queueRestored = false
+
+    /// Relaunch recovery: requeues interrupted + failed rows and pumps.
+    /// Called once the launch gate passes so binaries exist before anything
+    /// starts.
+    func restoreQueueAndResume() {
+        if !queueRestored {
+            queueRestored = true
+            if normalizeQueueForResume() { saveQueue() }
+        }
+        pump()
+    }
+
+    /// Applies the relaunch mapping without pumping (testable half of
+    /// restore; pump would spawn real downloads). Returns whether anything
+    /// was requeued.
+    @discardableResult
+    func normalizeQueueForResume() -> Bool {
+        var resumed = false
+        for i in queue.indices {
+            guard let next = Self.restoredStatus(for: queue[i].status) else { continue }
+            queue[i].status = next
+            queue[i].progress = 0
+            queue[i].phaseLabel = nil
+            queue[i].speedString = nil
+            queue[i].etaString = nil
+            queue[i].errorMessage = nil
+            transientFailures.removeValue(forKey: queue[i].id)
+            resumed = true
+        }
+        return resumed
+    }
+
     private func run(jobID: UUID) {
         guard let idx = queue.firstIndex(where: { $0.id == jobID }) else { return }
         queue[idx].status = .downloading
@@ -788,6 +875,7 @@ final class DownloadStore {
         let dir = URL(fileURLWithPath: job.outputPath ?? destination.path)
         let runStart = preparingInfo[jobID] ?? Date()
         startPreparingTicker(jobID)
+        saveQueue()
 
         Task {
             do {
@@ -831,6 +919,7 @@ final class DownloadStore {
                         self.queue[i].phaseLabel = "Tagging…"
                     }
                     self.runningCount = max(0, self.runningCount - 1)
+                    self.saveQueue()
                     self.pump()
                 }
                 if needsTagging, let path = finalPath {
@@ -870,16 +959,9 @@ final class DownloadStore {
                         if let p = resolvedPath {
                             self.queue[i].outputPath = p
                         }
-                        let done = self.queue[i]
-                        self.history.insert(HistoryEntry(
-                            title: done.tags.title.isEmpty ? done.displayTitle : done.tags.title,
-                            artist: done.tags.artist,
-                            url: done.url,
-                            format: done.kind == .audio ? done.audioFormat.rawValue : done.videoQuality.rawValue,
-                            filePath: done.outputPath ?? "",
-                            thumbnailURL: done.thumbnailURL
-                        ), at: 0)
-                        self.saveHistory()
+                        // History is filled at Clear-finished time, not here,
+                        // so completed rows survive a relaunch until seen.
+                        self.saveQueue()
                     }
                     self.notify(title: "Download finished", body: job.displayTitle)
                 }
@@ -891,6 +973,7 @@ final class DownloadStore {
                         self.queue[i].status = .cancelled
                     }
                     self.runningCount = max(0, self.runningCount - 1)
+                    self.saveQueue()
                     self.pump()
                 }
             } catch {
@@ -914,6 +997,7 @@ final class DownloadStore {
                         self.queue[i].errorMessage = error.localizedDescription
                     }
                     self.runningCount = max(0, self.runningCount - 1)
+                    self.saveQueue()
                     self.pump()
                 }
             }
@@ -938,11 +1022,15 @@ final class DownloadStore {
     // MARK: - History persistence (JSON, lightweight v1)
 
     private var historyURL: URL {
+        if let override = Self.historyFileOverride { return override }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("BeatStash", isDirectory: true)
         try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
         return base.appendingPathComponent("history.json")
     }
+
+    /// Test seam: redirect the history file (headless + Xcode tests).
+    @MainActor static var historyFileOverride: URL?
 
     private func loadHistory() {
         guard let data = try? Data(contentsOf: historyURL),
@@ -954,7 +1042,63 @@ final class DownloadStore {
     private func saveHistory() {
         let trimmed = Array(history.prefix(500))
         if let data = try? JSONEncoder().encode(trimmed) {
-            try? data.write(to: historyURL)
+            try? data.write(to: historyURL, options: .atomic)
+        }
+    }
+
+    // MARK: - Queue persistence (crash-safe, lightweight v1)
+
+    /// Versioned wrapper so future shapes fail soft (empty queue, never a
+    /// launch crash) instead of decoding garbage into rows.
+    private struct PersistedQueue: Codable {
+        var version: Int
+        var jobs: [DownloadJob]
+    }
+
+    private var queueURL: URL {
+        if let override = Self.queueFileOverride { return override }
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("BeatStash", isDirectory: true)
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base.appendingPathComponent("queue.json")
+    }
+
+    /// Test seam: redirect the queue file (headless + Xcode tests).
+    @MainActor static var queueFileOverride: URL?
+
+    /// Decode helper kept pure for tests (corrupt input → nil, never throws).
+    nonisolated static func decodeQueue(from data: Data) -> [DownloadJob]? {
+        guard let wrapper = try? JSONDecoder().decode(PersistedQueue.self, from: data),
+              wrapper.version == 1 else { return nil }
+        return wrapper.jobs
+    }
+
+    private func loadQueue() {
+        guard let data = try? Data(contentsOf: queueURL),
+              let jobs = Self.decodeQueue(from: data) else { return }
+        queue = jobs.map { job in
+            var job = job
+            // Live progress never survives a relaunch; settled rows keep
+            // their state (failed keeps its message, completed its path).
+            // Stale "Auto-retrying…" notes on queued rows are cleared since
+            // the attempt they belonged to is gone.
+            if job.status.isActive {
+                job.progress = 0
+                job.speedString = nil
+                job.etaString = nil
+                job.phaseLabel = nil
+                if job.status == .queued { job.errorMessage = nil }
+            }
+            return job
+        }
+    }
+
+    /// Synchronous + atomic: cheap (~1KB/job) and crash-safe. Called at every
+    /// queue mutation so quit/kill loses nothing.
+    private func saveQueue() {
+        let wrapper = PersistedQueue(version: 1, jobs: queue)
+        if let data = try? JSONEncoder().encode(wrapper) {
+            try? data.write(to: queueURL, options: .atomic)
         }
     }
 
