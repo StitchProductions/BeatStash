@@ -74,16 +74,12 @@ struct SidebarView: View {
         }
     }
 
-    /// "v1.0.0 (1)" from the generated Info.plist (MARKETING_VERSION +
-    /// CURRENT_PROJECT_VERSION) — tracks releases with no maintenance.
-    /// Nil in previews/tests where the host bundle has no such keys.
+    /// "v1.0.0" from the generated Info.plist (MARKETING_VERSION) — tracks
+    /// releases with no maintenance. Nil in previews/tests where the host
+    /// bundle has no such key.
     private static var appVersionString: String? {
         guard let v = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
         else { return nil }
-        if let b = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
-           !b.isEmpty {
-            return "v\(v) (\(b))"
-        }
         return "v\(v)"
     }
 }
