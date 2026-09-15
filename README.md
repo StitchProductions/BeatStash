@@ -1,5 +1,7 @@
 # BeatStash
 
+![BeatStash](docs/BeatStash.jpeg)
+
 Turn YouTube links and Spotify playlists into a tagged local music library — on your Mac, no server, no Homebrew, no API keys.
 
 ![CI](https://github.com/StitchProductions/BeatStash/actions/workflows/ci.yml/badge.svg)
