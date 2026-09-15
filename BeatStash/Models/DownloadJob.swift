@@ -52,6 +52,9 @@ public struct DownloadJob: Identifiable, Codable, Sendable {
     public var progress: Double // 0...1
     public var speedString: String?
     public var etaString: String?
+    /// Current phase label ("Preparing… trying option 2/4…", "Embedding cover…").
+    /// Display-only, never persisted.
+    public var phaseLabel: String?
     public var errorMessage: String?
     public var outputPath: String?
     public var selected: Bool // playlist checkbox
@@ -73,6 +76,7 @@ public struct DownloadJob: Identifiable, Codable, Sendable {
         tagsEdited: Bool = false,
         status: JobStatus = .pending,
         progress: Double = 0,
+        phaseLabel: String? = nil,
         selected: Bool = true
     ) {
         self.id = id
@@ -91,6 +95,7 @@ public struct DownloadJob: Identifiable, Codable, Sendable {
         self.tagsEdited = tagsEdited
         self.status = status
         self.progress = progress
+        self.phaseLabel = phaseLabel
         self.selected = selected
     }
 

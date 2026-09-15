@@ -64,7 +64,10 @@ struct QueueRowView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     if store.preparingIDs.contains(job.id), job.status == .downloading {
-                        Text("Preparing…").font(.caption).foregroundStyle(.secondary)
+                        Text(job.phaseLabel ?? "Preparing…").font(.caption).foregroundStyle(.secondary)
+                    }
+                    if job.status == .tagging {
+                        Text(job.phaseLabel ?? "Tagging…").font(.caption).foregroundStyle(.secondary)
                     }
                     if let s = job.speedString, job.status == .downloading {
                         Text(s).font(.caption).foregroundStyle(.secondary)

@@ -33,12 +33,36 @@ public actor YTDLPService: Sendable {
     public static let probeTimeoutFirst: TimeInterval = 30
     public static let probeTimeoutFallback: TimeInterval = 20
 
+    /// First-output watchdog for downloads: kill a yt-dlp run that prints
+    /// nothing (no progress, no postprocessor lines) within this long after
+    /// spawn, so a hung extraction fails fast into client fallback instead
+    /// of sitting on "Preparing…" forever. Extraction normally starts in
+    /// 5–15s; 30s is generous without letting a SABR-gated chain burn minutes.
+    static let downloadFirstOutputTimeout: TimeInterval = 30
+
+    /// Serializes download *extraction*: concurrent player-API extractions
+    /// from one IP throttle each other (measured far slower than serial),
+    /// while byte transfer parallelizes fine. Held only until first progress
+    /// (or attempt end), so downloads overlap once flowing.
+    nonisolated static let extractionGate = AsyncSemaphore(limit: 1)
+
     private let binaries: BinaryManager
     private let probes = ProbeRegistry()
 
     /// Active downloads for cancellation. Process is not Sendable;
     /// box it so the actor can hold it under Swift 6.
     private var active: [UUID: ProcessBox] = [:]
+
+    /// Exact output paths from successful runs (`--print after_move:filepath`),
+    /// keyed by job. The progress stream can't carry a result, so the store
+    /// picks these up after the stream finishes — no directory scans.
+    private var finishedPaths: [UUID: URL] = [:]
+
+    /// Takes (and clears) the exact output path for a finished job, if any.
+    public func takeFinishedPath(for id: UUID) -> URL? {
+        defer { finishedPaths.removeValue(forKey: id) }
+        return finishedPaths[id]
+    }
 
     private nonisolated static let log = Logger(
         subsystem: "StitchProductions.BeatStash", category: "probes")
@@ -55,7 +79,29 @@ public actor YTDLPService: Sendable {
     }
 
     private static func probeCacheKey(_ url: String) -> String {
-        url.trimmingCharacters(in: .whitespacesAndNewlines)
+        normalizedProbeKey(url.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// Normalizes probe cache keys so volatile share params don't bust the
+    /// cache: same video/playlist pasted with `si`, `feature`, `pp`, `pp`,
+    /// `app`, or reordered query items hits the same entry instead of paying
+    /// for another full flat probe. Only `v`/`list`/`index` identify the
+    /// content (plus the youtu.be path id); everything else is dropped.
+    /// Non-YouTube URLs pass through untouched. Pure (tested).
+    nonisolated static func normalizedProbeKey(_ url: String) -> String {
+        guard let comps = URLComponents(string: url),
+              let host = comps.host?.lowercased(),
+              host.contains("youtube.com") || host.contains("youtu.be")
+        else { return url }
+        if host.contains("youtu.be") {
+            let id = comps.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            return id.isEmpty ? url : "youtu.be:\(id.lowercased())"
+        }
+        let keep = Set(["v", "list", "index"])
+        let items = (comps.queryItems ?? []).filter { keep.contains($0.name.lowercased()) }
+            .sorted { $0.name < $1.name }
+        guard !items.isEmpty else { return url }
+        return "youtube:" + items.map { "\($0.name.lowercased())=\($0.value ?? "")" }.joined(separator: "&")
     }
 
     private func cacheProbe(key: String, result: ProbeResult, raw: String? = nil) {
@@ -144,14 +190,20 @@ public actor YTDLPService: Sendable {
         if diskCache == nil {
             diskCache = await Self.readDiskCacheFile()
         }
-        let key = Self.probeCacheKey(url)
-        guard let e = diskCache?[key],
-              Date().timeIntervalSince(e.at) < Self.diskCacheTTL else { return nil }
-        if case .playlist(_, let entries) = e.result, !entries.isEmpty,
-           entries.allSatisfy({ $0.thumbnail == nil && ($0.thumbnails?.isEmpty ?? true) }) {
-            return nil
+        // Normalized key first; raw trimmed URL as back-compat for entries
+        // cached before key normalization (they age out via TTL/cap).
+        let keys = [Self.probeCacheKey(url),
+                    url.trimmingCharacters(in: .whitespacesAndNewlines)]
+        for key in keys {
+            guard let e = diskCache?[key],
+                  Date().timeIntervalSince(e.at) < Self.diskCacheTTL else { continue }
+            if case .playlist(_, let entries) = e.result, !entries.isEmpty,
+               entries.allSatisfy({ $0.thumbnail == nil && ($0.thumbnails?.isEmpty ?? true) }) {
+                return nil
+            }
+            return e.result
         }
-        return e.result
+        return nil
     }
 
     /// Warms the session cache and persists to disk. Callers are async already.
@@ -432,6 +484,9 @@ public actor YTDLPService: Sendable {
             return true
         case .botCheck, .loginRequired, .videoUnavailable, .parseFailed, .missingBinary, .outputNotFound:
             return true // chains differ in trust; a login-gated client may still extract anonymously on another
+        case .thumbnailUnsupported:
+            return false // deterministic container limitation (probes never
+                // embed thumbnails, so this is defense-only): no chain can fix it
         }
     }
 
@@ -452,6 +507,11 @@ public actor YTDLPService: Sendable {
         }
         if lower.contains("page needs to be reloaded") {
             return .reloadRequired(msg)
+        }
+        // Deterministic container limitation, not a client problem: raised by
+        // EmbedThumbnailPP after the expensive work, on every chain alike.
+        if lower.contains("supported filetypes for thumbnail embedding") {
+            return .thumbnailUnsupported(msg)
         }
         if lower.contains("requested format is not available") {
             return .formatGated(msg)
@@ -477,7 +537,8 @@ public actor YTDLPService: Sendable {
         case .reloadRequired, .networkError, .formatGated, .botCheck,
              .probeTimeout, .clientFailed, .downloadFailed:
             return true
-        case .loginRequired, .videoUnavailable, .parseFailed, .missingBinary, .outputNotFound:
+        case .loginRequired, .videoUnavailable, .parseFailed, .missingBinary, .outputNotFound,
+             .thumbnailUnsupported:
             return false
         }
     }
@@ -503,9 +564,14 @@ public actor YTDLPService: Sendable {
         public var speed: String?
         public var eta: String?
         public var rawLine: String?
+        /// Human-readable phase for non-download output
+        /// ("Converting audio…", "Preparing… trying option 2/4…"). Nil during bytes.
+        public var phase: String? = nil
     }
 
-    /// Downloads one job. Streams progress; throws on failure.
+    /// Downloads one job's bytes. Streams progress (including postprocessor
+    /// phase labels); throws on failure. Tagging is the caller's job, so the
+    /// queue slot can be freed before the ffmpeg post-pass.
     /// - Parameters:
     ///   - job: format/tags snapshot at enqueue time.
     ///   - directory: destination folder (created if needed).
@@ -517,15 +583,8 @@ public actor YTDLPService: Sendable {
         AsyncThrowingStream { continuation in
             Task {
                 do {
-                    let file = try await self.runDownload(job: job, to: directory) { update in
+                    _ = try await self.runDownload(job: job, to: directory) { update in
                         continuation.yield(update)
-                    }
-                    // Tag pass (ffmpeg). Best-effort: don't fail DL if tagging fails,
-                    // surface via error only if file missing.
-                    if job.kind == .audio {
-                        try? await self.applyTags(to: file, tags: job.tags,
-                                                  format: job.audioFormat,
-                                                  artworkURL: job.artworkURL)
                     }
                     continuation.finish()
                 } catch {
@@ -578,15 +637,27 @@ public actor YTDLPService: Sendable {
 
         let auth = YouTubeAuth.load()
         let chains = auth.clientChains()
+        let start = Date()
         var lastError: Error = ServiceError.downloadFailed("yt-dlp failed with no message")
         for (i, chain) in chains.enumerated() {
             try Task.checkCancellation()
+            // Plain-language phase: no client jargon, with the previous
+            // failure's reason so the row never looks frozen and the user
+            // can see *why* we're trying another option. The store appends
+            // a live elapsed ticker on top.
+            onProgress(ProgressUpdate(
+                fraction: 0, speed: nil, eta: nil, rawLine: nil,
+                phase: Self.preparingPhase(
+                    attempt: i + 1, total: chains.count, lastError: i == 0 ? nil : lastError,
+                    elapsed: Date().timeIntervalSince(start))))
             do {
                 // Fresh cached dump only on the first attempt; retries
                 // re-extract (the dump's URLs may be exactly what's stale).
-                return try await runDownloadAttempt(
+                let url = try await runDownloadAttempt(
                     job: job, to: directory, auth: auth, chain: chain,
                     useLoadInfo: i == 0, onProgress: onProgress)
+                finishedPaths[job.id] = url
+                return url
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
@@ -599,6 +670,63 @@ public actor YTDLPService: Sendable {
             }
         }
         throw lastError
+    }
+
+    /// One-line plain reason for a chain failure, for preparing-phase labels.
+    /// No client names, no yt-dlp stderr — user-readable cause only.
+    /// Pure (tested).
+    nonisolated static func shortReason(for error: Error) -> String {
+        guard let e = error as? ServiceError else { return "didn't respond" }
+        switch e {
+        case .formatGated: return "had no audio formats"
+        case .reloadRequired: return "rejected the request"
+        case .botCheck: return "asked for a sign-in check"
+        case .loginRequired: return "needs a YouTube login"
+        case .videoUnavailable: return "is unavailable"
+        case .networkError: return "hit a network error"
+        case .probeTimeout: return "timed out"
+        case .clientFailed(let m):
+            let t = m.trimmingCharacters(in: .whitespacesAndNewlines)
+            return t.isEmpty ? "didn't respond" : t
+        case .downloadFailed(let m):
+            let t = m.trimmingCharacters(in: .whitespacesAndNewlines)
+            if t.isEmpty { return "didn't respond" }
+            return String(t.prefix(80))
+        case .parseFailed: return "couldn't be read"
+        case .missingBinary: return "yt-dlp is missing"
+        case .outputNotFound: return "produced no file"
+        case .thumbnailUnsupported: return "can't carry cover art"
+        }
+    }
+
+    /// Plain-language preparing label. Single-chain downloads stay a bare
+    /// "Preparing…"; multi-chain runs name the option and carry the previous
+    /// failure's reason. Elapsed ticks while the row looks otherwise frozen.
+    /// Pure (tested).
+    nonisolated static func preparingPhase(
+        attempt: Int, total: Int, lastError: Error?, elapsed: TimeInterval
+    ) -> String {
+        var s: String
+        if total <= 1 || attempt <= 1, lastError == nil {
+            s = "Preparing…"
+        } else if let lastError {
+            s = "Preparing… trying option \(attempt)/\(total) · option \(attempt - 1) \(shortReason(for: lastError))"
+        } else {
+            s = "Preparing… trying option \(attempt)/\(total)"
+        }
+        let secs = Int(elapsed)
+        if secs >= 2 { s += " · \(secs)s" }
+        return s
+    }
+
+    /// Strips a trailing " · Ns" elapsed suffix so the store's ticker can
+    /// re-stamp it every second without stacking suffixes. Pure (tested).
+    nonisolated static func strippingElapsedSuffix(_ phase: String) -> String {
+        var s = phase
+        while let range = s.range(of: #" · \d+s$"#, options: .regularExpression) {
+            s.removeSubrange(range)
+        }
+        return s
     }
 
     /// One process run for a single client chain (isolated so `active`
@@ -634,6 +762,19 @@ public actor YTDLPService: Sendable {
         process.standardOutput = outPipe
         process.standardError = errPipe
         active[job.id] = ProcessBox(process)
+        let box = active[job.id]!
+
+        // Serialize extraction: concurrent player-API extractions throttle
+        // each other. Released on first progress (bytes flowing → the slow
+        // part is over) or attempt end, so downloads still overlap.
+        await Self.extractionGate.acquire()
+        let gateReleased = LockedFlag()
+        let releaseExtractionOnce: @Sendable () -> Void = {
+            if !gateReleased.value {
+                gateReleased.set()
+                Self.extractionGate.release()
+            }
+        }
 
         return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<URL, Error>) in
             // Read progress off-thread. `FinishGate` is Sendable and guarantees single resume.
@@ -643,22 +784,54 @@ public actor YTDLPService: Sendable {
             let clearActive: @Sendable () -> Void = { [weak self] in
                 Task { await self?.clearActive(id: jobID) }
             }
+            let lines = ProgressLineBuffer()
+            let sawOutput = LockedFlag()
+            let timedOut = LockedFlag()
+            let finished = LockedFlag()
+            let printedPath = PrintedPathBox()
+
+            // First-output watchdog: a hung extraction prints nothing —
+            // kill it into client fallback instead of Preparing… forever.
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64(Self.downloadFirstOutputTimeout * 1_000_000_000))
+                if !finished.value, !sawOutput.value, box.process.isRunning {
+                    timedOut.set()
+                    box.process.terminate()
+                }
+            }
 
             outHandle.readabilityHandler = { handle in
                 let data = handle.availableData
                 guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-                for line in text.components(separatedBy: .newlines) {
+                sawOutput.set()
+                releaseExtractionOnce()
+                for line in lines.append(text) {
+                    if let p = Self.parsePrintedFilePath(line: line) {
+                        printedPath.set(p)
+                    }
                     if let p = Self.parseProgress(line: line) {
+                        lines.setFraction(p.fraction)
                         onProgress(p)
+                    } else if let phase = Self.phaseFor(line: line) {
+                        onProgress(ProgressUpdate(
+                            fraction: lines.fraction, speed: nil, eta: nil,
+                            rawLine: line, phase: phase))
                     }
                 }
             }
 
             process.terminationHandler = { proc in
+                finished.set()
                 outHandle.readabilityHandler = nil
                 clearActive()
-                if proc.terminationStatus == 0 {
-                    if let file = Self.newestFile(in: directory, matching: job) {
+                releaseExtractionOnce()
+                if timedOut.value {
+                    gate.resume(throwing: ServiceError.probeTimeout(Self.downloadFirstOutputTimeout))
+                } else if proc.terminationStatus == 0 {
+                    if let p = printedPath.value,
+                       FileManager.default.fileExists(atPath: p) {
+                        gate.resume(returning: URL(fileURLWithPath: p))
+                    } else if let file = Self.newestFile(in: directory, matching: job) {
                         gate.resume(returning: file)
                     } else if let file = Self.newestAudioFile(in: directory) {
                         gate.resume(returning: file)
@@ -679,6 +852,8 @@ public actor YTDLPService: Sendable {
             do {
                 try process.run()
             } catch {
+                finished.set()
+                releaseExtractionOnce()
                 gate.resume(throwing: error)
             }
         }
@@ -687,6 +862,7 @@ public actor YTDLPService: Sendable {
     public func cancel(id: UUID) {
         active[id]?.process.terminate()
         active.removeValue(forKey: id)
+        finishedPaths.removeValue(forKey: id)
     }
 
     private func clearActive(id: UUID) {
@@ -730,6 +906,11 @@ public actor YTDLPService: Sendable {
             args += YouTubeAuth.clientArgs(for: chain)
         }
         args += pluginArgs()
+        // Ask yt-dlp to report its exact final path: resolves history +
+        // Finder-reveal without scanning the destination directory (which
+        // stalls on big batches and misattributes files under concurrency).
+        // Parsed out of stdout in `runDownloadAttempt`; scans stay as fallback.
+        args += ["--print", "after_move:filepath"]
         args += ["-P", directory.path]
         switch job.kind {
         case .audio:
@@ -737,7 +918,14 @@ public actor YTDLPService: Sendable {
                 "-x",
                 "--audio-format", job.audioFormat.ytDlpValue,
                 "--audio-quality", "0",
-                "--embed-thumbnail", "--convert-thumbnails", "jpg",
+            ]
+            // yt-dlp hard-fails the whole job when asked to embed a thumbnail
+            // into a container that can't carry one (WAV) — after the full
+            // download + transcode. Gate the flags per format instead so the
+            // failure can never happen; our own tag pass likewise skips art
+            // for WAV (spec-poor). Pure helper, tested.
+            args += Self.thumbnailEmbedArgs(for: job.audioFormat)
+            args += [
                 "--add-metadata",
                 "-o", "%(playlist_index)02d - %(title)s [%(id)s].%(ext)s",
             ]
@@ -751,6 +939,16 @@ public actor YTDLPService: Sendable {
         }
         args.append(job.url)
         return args
+    }
+
+    /// Thumbnail-embed flags for an audio target. yt-dlp supports embedding
+    /// into mp3, ogg/opus, flac, m4a/mp4-family — everything we offer except
+    /// WAV, which fails the entire postprocess chain (`Supported filetypes
+    /// for thumbnail embedding are: …`). Skipping the flags also skips the
+    /// pointless thumbnail download + convert for WAV. Pure (tested).
+    nonisolated static func thumbnailEmbedArgs(for format: AudioFormat) -> [String] {
+        guard format != .wav else { return [] }
+        return ["--embed-thumbnail", "--convert-thumbnails", "jpg"]
     }
 
     /// Shared probe prefix: hardening + auth + client + optional POT plugin.
@@ -846,9 +1044,12 @@ public actor YTDLPService: Sendable {
     /// WAV: only INFO + BWF chunks are writable — Finder/Music may ignore them (spec limit).
     /// With Spotify artwork: downloaded once, cached, and attached (replacing
     /// any YouTube thumbnail); failures fall back to text-only tagging.
+    /// The temp file replaces the original only on a clean ffmpeg exit with
+    /// non-empty output — a killed/timed-out pass keeps the yt-dlp output.
     public func applyTags(to file: URL, tags: TrackTags, format: AudioFormat, artworkURL: String? = nil) async throws {
         guard let ffmpeg = await binaries.ffmpegPath else { return } // no ffmpeg → keep untagged file
         let tmp = file.deletingLastPathComponent().appendingPathComponent(".\(file.deletingPathExtension().lastPathComponent).tagged.\(file.pathExtension)")
+        try? FileManager.default.removeItem(at: tmp) // stale temp from a killed pass
         var args = ["-y", "-i", file.path]
         var artPath: String?
         if let artworkURL, !artworkURL.isEmpty, format != .wav {
@@ -857,7 +1058,28 @@ public actor YTDLPService: Sendable {
         }
         args += Self.tagOutputArgs(tags: tags, format: format, artPath: artPath)
         args.append(tmp.path)
-        _ = try? await runCapture(exe: ffmpeg, args: args, timeout: 60)
+        do {
+            let out = try await runCapture(exe: ffmpeg, args: args, timeout: 60)
+            guard out.exitCode == 0 else {
+                try? FileManager.default.removeItem(at: tmp)
+                return
+            }
+        } catch {
+            try? FileManager.default.removeItem(at: tmp)
+            return
+        }
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: tmp.path),
+              let size = attrs[.size] as? NSNumber, size.intValue > 0
+        else {
+            try? FileManager.default.removeItem(at: tmp)
+            return
+        }
+        do {
+            _ = try FileManager.default.replaceItemAt(file, withItemAt: tmp)
+        } catch {
+            try? FileManager.default.removeItem(at: file)
+            try? FileManager.default.moveItem(at: tmp, to: file)
+        }
     }
 
     /// Artwork cache cap (files; oldest mtime pruned on write).
@@ -873,7 +1095,7 @@ public actor YTDLPService: Sendable {
             .appendingPathComponent("BeatStash/artwork/\(digest).jpg", isDirectory: false)
         if FileManager.default.isReadableFile(atPath: dest.path) { return dest.path }
         do {
-            var req = URLRequest(url: remote, timeoutInterval: 20)
+            var req = URLRequest(url: remote, timeoutInterval: 10)
             req.setValue("image/*", forHTTPHeaderField: "Accept")
             let (data, response) = try await URLSession.shared.data(for: req)
             guard (response as? HTTPURLResponse)?.statusCode == 200,
@@ -945,6 +1167,48 @@ public actor YTDLPService: Sendable {
         return ProgressUpdate(fraction: min(max(pct / 100, 0), 1), speed: speed, eta: eta, rawLine: line)
     }
 
+    /// Human-readable phase for yt-dlp's non-download output lines, so the
+    /// queue never looks frozen during postprocessing (which emits no `%`).
+    /// Pure (tested). Check specific tags before generic ones.
+    nonisolated static func phaseFor(line: String) -> String? {
+        // WAV transcodes are huge (~10MB/min) with no progress: say so.
+        if line.contains("[ExtractAudio]"), line.lowercased().contains("wav") {
+            return "Saving WAV… large file, may sit at 100% a while"
+        }
+        if line.contains("[ExtractAudio]") { return "Converting audio…" }
+        if line.contains("[EmbedThumbnail]") { return "Embedding cover…" }
+        if line.contains("[ThumbnailsConvert]") { return "Converting cover…" }
+        if line.contains("[Metadata]") { return "Writing metadata…" }
+        if line.contains("[Merger]") { return "Merging formats…" }
+        if line.contains("[VideoConvertor]") { return "Converting video…" }
+        if line.contains("[VideoRemuxer]") { return "Remuxing video…" }
+        if line.contains("[download]") && line.contains("Destination:") {
+            return "Starting download…"
+        }
+        return nil
+    }
+
+    /// Picks `--print after_move:filepath` lines out of progress output.
+    /// The print is a bare absolute path, while every line yt-dlp itself
+    /// emits is tagged (`[download] …`, `[info] …`) — so a leading `/`
+    /// discriminates. Filenames routinely contain `[id]` and `%`, which must
+    /// NOT be excluded. Pure (tested).
+    nonisolated static func parsePrintedFilePath(line: String) -> String? {
+        let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard t.hasPrefix("/"), !t.contains("\t"), t.count > 2 else { return nil }
+        return t
+    }
+
+    /// Splits a pipe chunk into complete lines, carrying a partial trailing
+    /// line in `remainder` for the next chunk (pipe reads split UTF-8 lines
+    /// arbitrarily). Pure (tested).
+    nonisolated static func appendLines(buffer: String, chunk: String) -> (lines: [String], remainder: String) {
+        let text = buffer + chunk
+        var lines = text.components(separatedBy: .newlines)
+        let remainder = lines.removeLast()
+        return (lines, remainder)
+    }
+
     // MARK: - Low-level run
 
     public enum ServiceError: LocalizedError, Equatable {
@@ -960,6 +1224,7 @@ public actor YTDLPService: Sendable {
         case formatGated(String)
         case networkError(String)
         case clientFailed(String)
+        case thumbnailUnsupported(String)
 
         public var errorDescription: String? {
             switch self {
@@ -987,6 +1252,8 @@ public actor YTDLPService: Sendable {
                 return "Network problem reaching YouTube (\(m)). Retry in a moment."
             case .clientFailed(let m):
                 return "All YouTube clients failed (\(m)). Update yt-dlp and retry."
+            case .thumbnailUnsupported(let m):
+                return "This container can't carry cover art, so the cover step was refused (\(m)). The audio itself is fine — WAV carries text tags only; pick MP3, M4A, Opus, or FLAC for embedded covers."
             }
         }
     }
@@ -1217,5 +1484,89 @@ final class LockedFlag: @unchecked Sendable {
     nonisolated func set() {
         lock.lock(); defer { lock.unlock() }
         flag = true
+    }
+}
+
+/// Minimal async semaphore (permits + FIFO waiter queue), for serializing
+/// download extraction across concurrent jobs. Lock-guarded; `acquire`
+/// suspends without blocking a thread.
+final class AsyncSemaphore: @unchecked Sendable {
+    private let lock = NSLock()
+    nonisolated(unsafe) private var permits: Int
+    nonisolated(unsafe) private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    nonisolated init(limit: Int) { permits = max(limit, 1) }
+
+    func acquire() async {
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if permits > 0 {
+                permits -= 1
+                lock.unlock()
+                cont.resume()
+            } else {
+                waiters.append(cont)
+                lock.unlock()
+            }
+        }
+    }
+
+    nonisolated func release() {
+        lock.lock()
+        guard !waiters.isEmpty else {
+            permits += 1
+            lock.unlock()
+            return
+        }
+        let next = waiters.removeFirst()
+        lock.unlock()
+        next.resume()
+    }
+}
+
+/// Lock-guarded pipe line buffer: partial-line remainder plus the last seen
+/// progress fraction (so phase-only updates keep the bar where it was).
+final class ProgressLineBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    nonisolated(unsafe) private var remainder = ""
+    nonisolated(unsafe) private var lastFraction = 0.0
+
+    nonisolated init() {}
+
+    /// Appends a chunk, returning complete lines. Thread-safe.
+    nonisolated func append(_ chunk: String) -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        let (lines, rest) = YTDLPService.appendLines(buffer: remainder, chunk: chunk)
+        remainder = rest
+        return lines
+    }
+
+    nonisolated var fraction: Double {
+        lock.lock(); defer { lock.unlock() }
+        return lastFraction
+    }
+
+    nonisolated func setFraction(_ f: Double) {
+        lock.lock(); defer { lock.unlock() }
+        lastFraction = f
+    }
+}
+
+/// Lock-guarded holder for the `--print after_move:filepath` line: the last
+/// bare-path line wins (single-file runs print exactly one).
+final class PrintedPathBox: @unchecked Sendable {
+    private let lock = NSLock()
+    nonisolated(unsafe) private var path: String?
+
+    nonisolated init() {}
+
+    nonisolated var value: String? {
+        lock.lock(); defer { lock.unlock() }
+        return path
+    }
+
+    nonisolated func set(_ p: String) {
+        lock.lock(); defer { lock.unlock() }
+        path = p
     }
 }

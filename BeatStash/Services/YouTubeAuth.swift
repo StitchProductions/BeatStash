@@ -119,11 +119,14 @@ public struct YouTubeAuth: Codable, Sendable, Equatable {
 
     /// Ordered player-client chains to try. First success wins — even a
     /// format-gated success (360p-only) counts for probing, since metadata
-    /// is intact. Chains are ordered cheapest-first.
+    /// is intact.
     ///
-    /// Verified 2026-09-14 against `youtu.be/5tBG5f3EQNc`:
-    /// `android,ios,tv` extracts; `tv,web_safari` → "needs reload";
-    /// `mweb`/`web_safari` alone → "format not available".
+    /// Anonymous leads with `default`: verified 2026-09-15 on new IP against
+    /// `Hjw86NcG8Bo` — `default` yields full formats (401+251) while
+    /// `android,ios,tv` yields only degraded 18, `web_embedded` alone →
+    /// "format not available", and `tv`-led chains → "needs reload".
+    /// Mobile stays as the fallback: when `default` hits a sign-in bot-wall,
+    /// the chain loop still falls through to it instead of failing outright.
     public nonisolated func clientChains() -> [[String]] {
         if hasCookies {
             // Never tv+cookies: TV auth differs and invalidates the session.
@@ -134,6 +137,7 @@ public struct YouTubeAuth: Codable, Sendable, Equatable {
             ]
         }
         return [
+            ["default"],
             ["android", "ios", "tv"],
             ["web_embedded"],
             ["tv", "web_safari"],

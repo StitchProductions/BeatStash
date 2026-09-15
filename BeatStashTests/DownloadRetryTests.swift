@@ -19,7 +19,7 @@ struct DownloadRetryTests {
     @Test func chainTerminalErrors() {
         for e: YTDLPService.ServiceError in [
             .loginRequired("x"), .videoUnavailable("x"), .parseFailed("x"),
-            .missingBinary, .outputNotFound,
+            .missingBinary, .outputNotFound, .thumbnailUnsupported("x"),
         ] {
             #expect(!YTDLPService.shouldRetryDownloadChain(error: e, attemptsLeft: 2))
         }
@@ -60,11 +60,21 @@ struct DownloadRetryTests {
     }
 
     @Test func defaultChainUnchanged() async {
-        // No explicit chain: first chain as before (no behavior change).
+        // No explicit chain: first chain is default-first (no behavior change
+        // beyond ordering — the first anonymous chain leads).
         let args = await YTDLPService().buildArguments(
             job: DownloadJob(url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
                              kind: .audio, displayTitle: "T"),
             directory: URL(fileURLWithPath: "/tmp"))
-        #expect(args.contains("youtube:player_client=android,ios,tv"))
+        #expect(args.contains("youtube:player_client=default"))
+    }
+
+    @Test func downloadArgsReportExactPath() async {
+        // yt-dlp reports its own final path so history/Finder never scan dirs.
+        let args = await YTDLPService().buildArguments(
+            job: DownloadJob(url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                             kind: .audio, displayTitle: "T"),
+            directory: URL(fileURLWithPath: "/tmp"))
+        #expect(args.contains("after_move:filepath"))
     }
 }

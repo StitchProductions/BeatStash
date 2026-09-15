@@ -103,6 +103,43 @@ struct ProbeErrorTests {
         #expect(YTDLPService.parseProgress(line: "[download] Destination: x.mp4") == nil)
     }
 
+    @Test func downloadPhaseLabels() {
+        #expect(YTDLPService.phaseFor(line: "[ExtractAudio] Destination: x.m4a") == "Converting audio…")
+        #expect(YTDLPService.phaseFor(line: "[EmbedThumbnail] mutagen") == "Embedding cover…")
+        #expect(YTDLPService.phaseFor(line: "[ThumbnailsConvert] Converting") == "Converting cover…")
+        #expect(YTDLPService.phaseFor(line: "[Metadata] Adding metadata") == "Writing metadata…")
+        #expect(YTDLPService.phaseFor(line: "[Merger] Merging formats") == "Merging formats…")
+        #expect(YTDLPService.phaseFor(line: "[VideoConvertor] Converting") == "Converting video…")
+        #expect(YTDLPService.phaseFor(line: "[download] Destination: x.mp4") == "Starting download…")
+        #expect(YTDLPService.phaseFor(line: "[download]  42.3% of ~5MiB at 2MiB/s ETA 00:02") == nil)
+        #expect(YTDLPService.phaseFor(line: "[info] hello") == nil)
+    }
+
+    @Test func pipeChunkSplitCarriesRemainder() {
+        let (lines, rest) = YTDLPService.appendLines(buffer: "", chunk: "[downlo")
+        #expect(lines.isEmpty && rest == "[downlo")
+        let (lines2, rest2) = YTDLPService.appendLines(buffer: rest, chunk: "ad]  10% done\n[downlo")
+        #expect(lines2 == ["[download]  10% done"] && rest2 == "[downlo")
+        let (lines3, rest3) = YTDLPService.appendLines(buffer: rest2, chunk: "ad] done\n")
+        #expect(lines3 == ["[download] done"] && rest3.isEmpty)
+    }
+
+    @Test func extractionGateSerializes() async {
+        let gate = AsyncSemaphore(limit: 1)
+        await gate.acquire()
+        let entered = LockedFlag()
+        let waiter = Task {
+            await gate.acquire()
+            entered.set()
+            gate.release()
+        }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        #expect(!entered.value) // second acquirer blocks while held
+        gate.release()
+        await waiter.value
+        #expect(entered.value)
+    }
+
     @Test func probeArgsIgnoreMissingFormats() async {
         // Worst-case insurance: format-gated videos succeed on chain 0 with
         // metadata instead of burning every fallback. Probe-only — downloads
@@ -114,5 +151,102 @@ struct ProbeErrorTests {
                              kind: .audio, displayTitle: "T", tags: TrackTags()),
             directory: URL(fileURLWithPath: "/tmp"))
         #expect(!downloadArgs.contains("--ignore-no-formats-error"))
+    }
+
+    @Test func wavPhaseWarnsAboutStall() {
+        #expect(YTDLPService.phaseFor(line: "[ExtractAudio] Destination: track.wav") ==
+            "Saving WAV… large file, may sit at 100% a while")
+        // Non-WAV extraction labels are unchanged.
+        #expect(YTDLPService.phaseFor(line: "[ExtractAudio] Destination: x.m4a") == "Converting audio…")
+    }
+
+    @Test func preparingPhasePlainLanguage() {
+        // Single chain: bare label, no jargon, no option numbers.
+        #expect(YTDLPService.preparingPhase(attempt: 1, total: 1, lastError: nil, elapsed: 0) == "Preparing…")
+        // First of many: option number, no blame yet.
+        #expect(YTDLPService.preparingPhase(attempt: 1, total: 4, lastError: nil, elapsed: 0) == "Preparing…")
+        // Retry carries the previous failure's reason — never a client name.
+        let p = YTDLPService.preparingPhase(
+            attempt: 2, total: 4,
+            lastError: YTDLPService.ServiceError.formatGated("x"), elapsed: 0)
+        #expect(p.contains("trying option 2/4"))
+        #expect(p.contains("had no audio formats"))
+        #expect(!p.contains("android") && !p.contains("client"))
+        // Elapsed ticks only once the stall is real (≥2s).
+        let slow = YTDLPService.preparingPhase(attempt: 2, total: 4, lastError: nil, elapsed: 12)
+        #expect(slow.contains("12s"))
+        let fast = YTDLPService.preparingPhase(attempt: 1, total: 4, lastError: nil, elapsed: 0)
+        #expect(!fast.contains("0s"))
+    }
+
+    @Test func shortReasonHasNoJargon() {
+        #expect(YTDLPService.shortReason(for: YTDLPService.ServiceError.formatGated("x")) == "had no audio formats")
+        #expect(YTDLPService.shortReason(for: YTDLPService.ServiceError.reloadRequired("x")) == "rejected the request")
+        #expect(YTDLPService.shortReason(for: YTDLPService.ServiceError.botCheck("x")) == "asked for a sign-in check")
+        #expect(YTDLPService.shortReason(for: YTDLPService.ServiceError.networkError("x")) == "hit a network error")
+        #expect(YTDLPService.shortReason(for: YTDLPService.ServiceError.probeTimeout(30)) == "timed out")
+        for e: YTDLPService.ServiceError in [
+            .formatGated("x"), .reloadRequired("x"), .botCheck("x"),
+            .loginRequired("x"), .networkError("x"), .probeTimeout(1),
+            .thumbnailUnsupported("x"),
+        ] {
+            #expect(!YTDLPService.shortReason(for: e).contains("android"))
+            #expect(!YTDLPService.shortReason(for: e).contains("player_client"))
+        }
+    }
+
+    @Test func strippingElapsedSuffixIdempotent() {
+        #expect(YTDLPService.strippingElapsedSuffix("Preparing…") == "Preparing…")
+        #expect(YTDLPService.strippingElapsedSuffix("Preparing… · 12s") == "Preparing…")
+        #expect(YTDLPService.strippingElapsedSuffix("Preparing… trying option 2/4 · 7s") ==
+            "Preparing… trying option 2/4")
+    }
+
+    @Test func printedFilePathParsing() {
+        #expect(YTDLPService.parsePrintedFilePath(line: "/Music/01 - Title [abc].m4a") ==
+            "/Music/01 - Title [abc].m4a")
+        #expect(YTDLPService.parsePrintedFilePath(line: "[download]  42.3% of ~5MiB at 2MiB/s ETA 00:02") == nil)
+        #expect(YTDLPService.parsePrintedFilePath(line: "[info] hello") == nil)
+        #expect(YTDLPService.parsePrintedFilePath(line: "[ExtractAudio] Destination: x.m4a") == nil)
+        #expect(YTDLPService.parsePrintedFilePath(line: "") == nil)
+    }
+
+    @Test func probeKeyNormalization() {
+        // Volatile share params must not bust the probe cache into a re-probe.
+        let a = YTDLPService.normalizedProbeKey("https://www.youtube.com/watch?v=abc123&si=XYZ&feature=shared")
+        let b = YTDLPService.normalizedProbeKey("https://www.youtube.com/watch?v=abc123")
+        #expect(a == b)
+        // Param order is irrelevant; identity params are kept.
+        let c = YTDLPService.normalizedProbeKey("https://www.youtube.com/watch?list=PL1&v=abc123")
+        let d = YTDLPService.normalizedProbeKey("https://www.youtube.com/watch?v=abc123&list=PL1")
+        #expect(c == d)
+        // Different videos still differ; non-YouTube passes through.
+        #expect(YTDLPService.normalizedProbeKey("https://www.youtube.com/watch?v=aaa") !=
+            YTDLPService.normalizedProbeKey("https://www.youtube.com/watch?v=bbb"))
+        #expect(YTDLPService.normalizedProbeKey("https://example.com/x?si=1") == "https://example.com/x?si=1")
+    }
+
+    @Test func firstOutputWatchdogIsFast() {
+        // A hung SABR-gated extraction must fail into fallback in seconds,
+        // not sit on "Preparing…" for minutes.
+        #expect(YTDLPService.downloadFirstOutputTimeout <= 45)
+    }
+
+    @Test func thumbnailUnsupportedClassification() {
+        // Real yt-dlp EmbedThumbnailPP failure shape (e.g. WAV target).
+        let e = YTDLPService.classifyProbeError(
+            stderr: "ERROR: Postprocessing: Supported filetypes for thumbnail embedding are: mp3, mkv/mka, ogg/opus/flac, m4a/mp4/m4v/mov")
+        if case .thumbnailUnsupported = e {} else { Issue.record("expected thumbnailUnsupported") }
+    }
+
+    @Test func thumbnailUnsupportedNeverRetries() {
+        // Deterministic container limitation: no other client can fix it, so
+        // it must fail fast instead of burning every chain + auto-requeue.
+        let e = YTDLPService.ServiceError.thumbnailUnsupported("x")
+        #expect(!YTDLPService.shouldRetryDownloadChain(error: e, attemptsLeft: 3))
+        #expect(!YTDLPService.shouldAutoRequeue(error: e, attemptsUsed: 0))
+        #expect(!YTDLPService.isRetryableProbeError(e))
+        #expect(YTDLPService.shortReason(for: e) == "can't carry cover art")
+        #expect(!YTDLPService.shortReason(for: e).contains("android"))
     }
 }

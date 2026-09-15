@@ -36,8 +36,11 @@ struct YouTubeAuthTests {
 
     @Test func anonymousChains() {
         let chains = YouTubeAuth().clientChains()
-        #expect(chains.first == ["android", "ios", "tv"])
-        #expect(chains.count == 3)
+        // Default first: full formats on a clean IP; mobile stays as fallback
+        // for sign-in bot-walls (verified 2026-09-15, Hjw86NcG8Bo).
+        #expect(chains.first == ["default"])
+        #expect(chains.count == 4)
+        #expect(chains.contains(["android", "ios", "tv"]))
     }
 
     @Test func tvNeverPairedWithCookies() {

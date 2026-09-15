@@ -77,4 +77,35 @@ struct DownloadArgsTests {
         #expect(!withArt.contains("attached_pic"))
     }
 
+    @Test func thumbnailEmbedGatedPerFormat() {
+        // yt-dlp hard-fails the whole job when asked to embed into WAV
+        // (after download + transcode), so WAV must never get the flags.
+        #expect(YTDLPService.thumbnailEmbedArgs(for: .wav).isEmpty)
+        for format: AudioFormat in [.mp3, .m4a, .flac, .opus] {
+            let args = YTDLPService.thumbnailEmbedArgs(for: format)
+            #expect(args.contains("--embed-thumbnail"), "\(format)")
+            #expect(args.contains("--convert-thumbnails"), "\(format)")
+        }
+    }
+
+    @Test func wavDownloadSkipsEmbedFlags() async {
+        let wavArgs = await YTDLPService().buildArguments(
+            job: DownloadJob(url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                             kind: .audio, displayTitle: "T", audioFormat: .wav),
+            directory: URL(fileURLWithPath: "/tmp"),
+            auth: YouTubeAuth(), chain: ["default"])
+        #expect(!wavArgs.contains("--embed-thumbnail"))
+        #expect(!wavArgs.contains("--convert-thumbnails"))
+        // Conversion + text metadata still apply — only the cover step is cut.
+        #expect(wavArgs.contains("--audio-format"))
+        #expect(wavArgs.contains("--add-metadata"))
+
+        let mp3Args = await YTDLPService().buildArguments(
+            job: DownloadJob(url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                             kind: .audio, displayTitle: "T", audioFormat: .mp3),
+            directory: URL(fileURLWithPath: "/tmp"),
+            auth: YouTubeAuth(), chain: ["default"])
+        #expect(mp3Args.contains("--embed-thumbnail"))
+    }
+
 }

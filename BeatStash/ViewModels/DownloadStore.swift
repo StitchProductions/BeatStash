@@ -690,14 +690,17 @@ final class DownloadStore {
         guard let i = queue.firstIndex(where: { $0.id == id }) else { return }
         queue[i].status = .queued
         queue[i].progress = 0
+        queue[i].phaseLabel = nil
         queue[i].errorMessage = nil
         transientFailures.removeValue(forKey: id)
+        stopPreparingTicker(id)
         pump()
     }
 
     func cancel(id: UUID) {
         Task { await service.cancel(id: id) }
         preparingIDs.remove(id)
+        stopPreparingTicker(id)
         transientFailures.removeValue(forKey: id)
         if let i = queue.firstIndex(where: { $0.id == id }) {
             if queue[i].status.isActive {
@@ -711,6 +714,7 @@ final class DownloadStore {
         for j in queue where j.status.isActive {
             Task { await service.cancel(id: j.id) }
             preparingIDs.remove(j.id)
+            stopPreparingTicker(j.id)
             transientFailures.removeValue(forKey: j.id)
         }
         for i in queue.indices where queue[i].status.isActive {
@@ -729,6 +733,39 @@ final class DownloadStore {
     /// Shown as an indeterminate "Preparing…" row state in the queue.
     var preparingIDs: Set<UUID> = []
 
+    /// Extraction start per preparing job (for the elapsed ticker) + the
+    /// ticker tasks themselves. MainActor-confined like everything here.
+    private var preparingInfo: [UUID: Date] = [:]
+    private var preparingTickers: [UUID: Task<Void, Never>] = [:]
+
+    /// Ticks `Preparing… · Ns` once a second while a job is still extracting,
+    /// so a slow player-API call reads as alive, not frozen. Stops the moment
+    /// bytes flow (preparingIDs cleared), the job settles, or it cancels.
+    private func startPreparingTicker(_ id: UUID) {
+        preparingTickers[id]?.cancel()
+        preparingTickers[id] = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    guard let self, self.preparingIDs.contains(id),
+                          let i = self.queue.firstIndex(where: { $0.id == id }),
+                          let start = self.preparingInfo[id],
+                          let phase = self.queue[i].phaseLabel,
+                          phase.hasPrefix("Preparing") else { return }
+                    let base = YTDLPService.strippingElapsedSuffix(phase)
+                    let secs = Int(Date().timeIntervalSince(start))
+                    self.queue[i].phaseLabel = secs >= 2 ? "\(base) · \(secs)s" : base
+                }
+            }
+        }
+    }
+
+    private func stopPreparingTicker(_ id: UUID) {
+        preparingTickers.removeValue(forKey: id)?.cancel()
+        preparingInfo.removeValue(forKey: id)
+    }
+
     /// Transient-failure counts for bounded auto-requeue (in-memory only:
     /// a relaunch starts every job with a clean slate).
     private var transientFailures: [UUID: Int] = [:]
@@ -745,33 +782,82 @@ final class DownloadStore {
         guard let idx = queue.firstIndex(where: { $0.id == jobID }) else { return }
         queue[idx].status = .downloading
         preparingIDs.insert(jobID)
+        preparingInfo[jobID] = Date()
         runningCount += 1
         let job = queue[idx]
         let dir = URL(fileURLWithPath: job.outputPath ?? destination.path)
+        startPreparingTicker(jobID)
 
         Task {
             do {
                 let stream = await service.download(job: job, to: dir)
-                var finalPath: String?
                 for try await update in stream {
                     await MainActor.run {
                         if let i = self.queue.firstIndex(where: { $0.id == jobID }) {
-                            self.queue[i].progress = update.fraction
-                            self.queue[i].speedString = update.speed
-                            self.queue[i].etaString = update.eta
-                            self.preparingIDs.remove(jobID)
+                            if update.fraction > 0 {
+                                self.queue[i].progress = update.fraction
+                                self.queue[i].speedString = update.speed
+                                self.queue[i].etaString = update.eta
+                                self.preparingIDs.remove(jobID)
+                            }
+                            if let phase = update.phase {
+                                self.queue[i].phaseLabel = phase
+                            } else if update.fraction > 0 {
+                                self.queue[i].phaseLabel = nil
+                            }
                         }
                     }
                 }
-                // Resolve newest file for history (service already tagged).
-                finalPath = await self.newestPath(in: dir)
+                // Bytes done. Prefer yt-dlp's own reported path
+                // (`--print after_move:filepath`); the directory scan is only
+                // a fallback for older/odd outputs. Free the concurrency slot
+                // BEFORE any ffmpeg tag pass so tagging never stalls the queue.
+                // Tagging runs only when the user edited tags or supplied
+                // artwork — untouched rows keep yt-dlp's embedded metadata
+                // as-is (and skip the WAV rewrite stall entirely).
+                // Videos skip tagging entirely.
+                let needsTagging = job.kind == .audio
+                    && (job.tagsEdited || !(job.artworkURL?.isEmpty ?? true))
+                var finalPath: String? = await service.takeFinishedPath(for: jobID)?.path
+                if finalPath == nil {
+                    finalPath = await self.newestPath(in: dir)
+                }
                 await MainActor.run {
                     self.preparingIDs.remove(jobID)
+                    self.stopPreparingTicker(jobID)
+                    if let i = self.queue.firstIndex(where: { $0.id == jobID }), needsTagging {
+                        self.queue[i].status = .tagging
+                        self.queue[i].phaseLabel = "Tagging…"
+                    }
+                    self.runningCount = max(0, self.runningCount - 1)
+                    self.pump()
+                }
+                if needsTagging, let path = finalPath {
+                    try? await service.applyTags(
+                        to: URL(fileURLWithPath: path), tags: job.tags,
+                        format: job.audioFormat, artworkURL: job.artworkURL)
+                }
+                // Tagging replaces in place, so the download path stays
+                // correct; only fall back to a scan if somehow the file isn't
+                // where yt-dlp said it put it.
+                var resolvedPath: String? = finalPath
+                if let p = resolvedPath, FileManager.default.fileExists(atPath: p) {
+                    // exact path confirmed — no scan needed.
+                } else {
+                    resolvedPath = await self.newestPath(in: dir)
+                }
+                await MainActor.run {
+                    self.preparingIDs.remove(jobID)
+                    self.stopPreparingTicker(jobID)
                     self.transientFailures.removeValue(forKey: jobID)
-                    if let i = self.queue.firstIndex(where: { $0.id == jobID }) {
+                    if let i = self.queue.firstIndex(where: { $0.id == jobID }),
+                       self.queue[i].status == (needsTagging ? .tagging : .downloading) {
                         self.queue[i].status = .completed
                         self.queue[i].progress = 1
-                        self.queue[i].outputPath = finalPath ?? self.queue[i].outputPath
+                        self.queue[i].phaseLabel = nil
+                        if let p = resolvedPath {
+                            self.queue[i].outputPath = p
+                        }
                         let done = self.queue[i]
                         self.history.insert(HistoryEntry(
                             title: done.tags.title.isEmpty ? done.displayTitle : done.tags.title,
@@ -783,13 +869,12 @@ final class DownloadStore {
                         ), at: 0)
                         self.saveHistory()
                     }
-                    self.runningCount = max(0, self.runningCount - 1)
                     self.notify(title: "Download finished", body: job.displayTitle)
-                    self.pump()
                 }
             } catch is CancellationError {
                 await MainActor.run {
                     self.preparingIDs.remove(jobID)
+                    self.stopPreparingTicker(jobID)
                     if let i = self.queue.firstIndex(where: { $0.id == jobID }) {
                         self.queue[i].status = .cancelled
                     }
@@ -799,6 +884,7 @@ final class DownloadStore {
             } catch {
                 await MainActor.run {
                     self.preparingIDs.remove(jobID)
+                    self.stopPreparingTicker(jobID)
                     let used = self.transientFailures[jobID] ?? 0
                     if YTDLPService.shouldAutoRequeue(error: error, attemptsUsed: used),
                        let i = self.queue.firstIndex(where: { $0.id == jobID }) {
@@ -808,6 +894,7 @@ final class DownloadStore {
                         self.transientFailures[jobID] = used + 1
                         self.queue[i].status = .queued
                         self.queue[i].progress = 0
+                        self.queue[i].phaseLabel = nil
                         self.queue[i].errorMessage = "Auto-retrying (attempt \(used + 2)/3)…"
                     } else if let i = self.queue.firstIndex(where: { $0.id == jobID }) {
                         self.transientFailures.removeValue(forKey: jobID)

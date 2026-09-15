@@ -61,7 +61,7 @@ public enum AudioFormat: String, CaseIterable, Codable, Sendable, Identifiable {
     public nonisolated var footnote: String? {
         switch self {
         case .wav:
-            return "WAV is DAW-ready but large (~10 MB/min). Source is still YouTube-quality."
+            return "WAV is DAW-ready but large (~10 MB/min). Source is still YouTube-quality. WAV can't carry cover art (text tags only)."
         case .flac:
             return "FLAC is a lossless container of a lossy source — larger, same fidelity."
         default:
