@@ -60,9 +60,9 @@ struct SettingsView: View {
 
             Section("Spotify") {
                 Toggle("Confidence check (MusicBrainz)", isOn: $confidenceCheckEnabled)
-                Text("Slows down matching — extra requests per ambiguous track.")
+                Text("Each song always needs its ~10–15s YouTube search, on or off — this only adds MusicBrainz cross-checks on uncertain matches.")
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(.secondary)
                 Text("Off by default. Matches use title, artist and duration only. When on, uncertain matches get a MusicBrainz cross-check that can upgrade to Exact.")
                     .font(.caption)
                     .foregroundStyle(.secondary)

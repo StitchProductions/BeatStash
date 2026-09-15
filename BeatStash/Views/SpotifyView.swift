@@ -4,6 +4,7 @@ import AppKit
 struct SpotifyView: View {
     @Environment(SpotifyImportStore.self) private var imports
     @Environment(DownloadStore.self) private var store
+    @AppStorage("spotifyConfidenceCheckEnabled") private var confidenceCheckEnabled = false
 
     var body: some View {
         @Bindable var imports = imports
@@ -82,6 +83,11 @@ struct SpotifyView: View {
                     }
                     .buttonStyle(.link)
                     .disabled(imports.matchedCount == 0)
+                    Button("Clear all") {
+                        imports.clearTracks()
+                    }
+                    .buttonStyle(.link)
+                    .help("Remove all imported tracks — your pasted link stays")
                     Text("•")
                         .foregroundStyle(.secondary)
                     Text("\(imports.selectedMatchedCount) of \(imports.tracks.count) selected")
@@ -109,7 +115,9 @@ struct SpotifyView: View {
 
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Match % = title, artist authority, duration anchor, MusicBrainz exact links. Unticked rows need review.")
+                        Text(confidenceCheckEnabled
+                            ? "Match % = title, artist authority, duration anchor, MusicBrainz exact links. Unticked rows need review."
+                            : "Match % = title, artist authority and duration anchor. Unticked rows need review.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         if imports.isImporting {
@@ -153,6 +161,10 @@ struct SpotifyView: View {
 struct SpotifyTrackRow: View {
     @Environment(SpotifyImportStore.self) private var imports
     @Binding var track: SpotifyImportTrack
+    @State private var now = Date()
+    // Live refresh when the toggle flips (the store's computed flag alone
+    // would not invalidate the view).
+    @AppStorage("spotifyConfidenceCheckEnabled") private var confidenceCheckEnabled = false
 
     var body: some View {
         HStack(spacing: 10) {
@@ -196,25 +208,38 @@ struct SpotifyTrackRow: View {
     private var statusLine: some View {
         switch track.status {
         case .working:
-            Text("Matching…")
+            Text("Matching…\(SpotifyImportStore.matchingElapsedSuffix(since: imports.matchingStartedAt[track.id], now: now))")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .task {
+                    // Ticks the elapsed suffix while this row is working;
+                    // cancelled automatically when the row settles.
+                    while !Task.isCancelled {
+                        try? await Task.sleep(nanoseconds: 1_000_000_000)
+                        now = Date()
+                    }
+                }
         case .matched(let score, _, let ytTitle, _, let exact):
             HStack(spacing: 6) {
-                if exact {
-                    Text("Exact")
-                        .font(.caption2.bold())
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(.green.opacity(0.2), in: Capsule())
-                        .foregroundStyle(.green)
-                } else {
-                    Text("\(Int((score * 100).rounded()))% confidence")
-                        .font(.caption2.monospaced())
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(.tint.opacity(0.15), in: Capsule())
-                        .foregroundStyle(.secondary)
+                // No score UI at all with the check off (nil badge). On-state
+                // styling is unchanged from before.
+                if let badge = SpotifyImportStore.confidenceBadgeText(
+                    score: score, exact: exact, enabled: confidenceCheckEnabled) {
+                    if exact {
+                        Text(badge)
+                            .font(.caption2.bold())
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(.green.opacity(0.2), in: Capsule())
+                            .foregroundStyle(.green)
+                    } else {
+                        Text(badge)
+                            .font(.caption2.monospaced())
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(.tint.opacity(0.15), in: Capsule())
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 Text(ytTitle)
                     .font(.caption)

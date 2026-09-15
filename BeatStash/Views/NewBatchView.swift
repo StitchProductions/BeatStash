@@ -154,6 +154,11 @@ struct NewBatchView: View {
                         store.setAllSelected(!store.allSelected)
                     }
                     .buttonStyle(.link)
+                    Button("Clear list") {
+                        store.clearDrafts()
+                    }
+                    .buttonStyle(.link)
+                    .help("Remove all fetched tracks — your pasted links stay")
                     Text("•")
                         .foregroundStyle(.secondary)
                     Text("\(store.selectedDrafts.count) of \(store.draftJobs.count) selected")

@@ -46,12 +46,16 @@ public struct SpotifyImportTrack: Identifiable, Sendable {
 /// oEmbed metadata (~0.2s) + Deezer anchor (~0.3s) → `ytsearch5` (~13s) →
 /// score → optional MusicBrainz confidence check when uncertain
 /// (paced ≥1.1s, silent degrade; OFF by default — see Settings).
+/// The search per song always runs (first import); the toggle only adds or
+/// removes the MusicBrainz step — and the score badges, which follow it.
 /// Matches land in the New Batch drafts; nothing downloads from here.
 @Observable
 final class SpotifyImportStore {
     /// UserDefaults key for the optional post-score MusicBrainz check.
     /// OFF by default: enabling slows matching (2+ extra requests per
     /// ambiguous track). Settings toggles this via @AppStorage on the same key.
+    /// Row score badges also follow this flag (no score UI when off), while
+    /// internal scoring + auto-select always run to pick the match.
     static let confidenceCheckKey = "spotifyConfidenceCheckEnabled"
 
     /// Live read-through so Settings (@AppStorage) and the store never drift.
@@ -65,12 +69,75 @@ final class SpotifyImportStore {
         set { UserDefaults.standard.set(newValue, forKey: Self.confidenceCheckKey) }
     }
 
+    /// Badge text for a matched row, or nil when badges are off. With the
+    /// check off there is no score UI at all (scoring still runs internally
+    /// to pick the match and drive auto-select). Pure (tested).
+    nonisolated static func confidenceBadgeText(score: Double, exact: Bool, enabled: Bool) -> String? {
+        guard enabled else { return nil }
+        if exact { return "Exact" }
+        return "\(Int((score * 100).rounded()))% confidence"
+    }
+
     var urlText: String = ""
     var isImporting = false
     var progress: String?
     var errorMessage: String?
     var playlistTitle: String?
     var tracks: [SpotifyImportTrack] = []
+
+    /// Phase-B start per working row (for the "Matching… · Ns" ticker).
+    /// Set when a row begins matching, cleared when it settles.
+    var matchingStartedAt: [String: Date] = [:]
+
+    /// Header progress state for the elapsed ticker (Phase B only).
+    private var matchProgressState: (done: Int, total: Int, start: Date)?
+    private var progressTicker: Task<Void, Never>?
+
+    /// Header progress with elapsed ("Matching 12/58… · 3:12").
+    /// Pure (tested).
+    nonisolated static func matchingProgress(done: Int, total: Int, elapsed: TimeInterval) -> String {
+        let base = total <= 1 ? "Matching…" : "Matching \(done + 1)/\(total)…"
+        let secs = Int(elapsed)
+        guard secs >= 2 else { return base }
+        return "\(base) · \(elapsedString(secs))"
+    }
+
+    /// Row suffix (" · 0:45"), empty until the stall is real. Pure (tested).
+    nonisolated static func matchingElapsedSuffix(since: Date?, now: Date) -> String {
+        guard let since else { return "" }
+        let secs = Int(now.timeIntervalSince(since))
+        guard secs >= 2 else { return "" }
+        return " · \(elapsedString(secs))"
+    }
+
+    nonisolated static func elapsedString(_ secs: Int) -> String {
+        "\(secs / 60):\(String(format: "%02d", secs % 60))"
+    }
+
+    /// Re-stamps header progress once a second while Phase-B matching runs,
+    /// so a long single search reads as alive, not frozen.
+    private func startProgressTicker() {
+        progressTicker?.cancel()
+        progressTicker = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    guard let self, self.isImporting,
+                          let st = self.matchProgressState else { return }
+                    self.progress = Self.matchingProgress(
+                        done: st.done, total: st.total,
+                        elapsed: Date().timeIntervalSince(st.start))
+                }
+            }
+        }
+    }
+
+    private func stopProgressTicker() {
+        progressTicker?.cancel()
+        progressTicker = nil
+        matchProgressState = nil
+    }
 
     private var importTask: Task<Void, Never>?
     private var importSession: UUID?
@@ -150,7 +217,25 @@ final class SpotifyImportStore {
     func cancelImport() {
         importTask?.cancel()
         Task { await service.cancelProbes() }
+        stopProgressTicker()
         if isImporting { isImporting = false }
+    }
+
+    /// Clears imported tracks (Clear all button). The pasted link stays so
+    /// the import can be edited and re-run; session memo + disk match cache
+    /// stay too, so re-importing stays instant. Any in-flight import is
+    /// cancelled and orphaned via a fresh session so late publishes can't
+    /// repopulate the list.
+    func clearTracks() {
+        cancelImport()
+        importTask = nil
+        importSession = UUID()
+        isImporting = false
+        progress = nil
+        errorMessage = nil
+        tracks = []
+        playlistTitle = nil
+        matchingStartedAt.removeAll()
     }
 
     private func performImport(session: UUID) async {
@@ -163,9 +248,15 @@ final class SpotifyImportStore {
         isImporting = true
         errorMessage = nil
         tracks = []
+        matchingStartedAt.removeAll()
+        stopProgressTicker()
         playlistTitle = nil
         progress = "Reading Spotify…"
-        defer { if importSession == session { isImporting = false }; progress = nil }
+        defer {
+            if importSession == session { isImporting = false }
+            progress = nil
+            stopProgressTicker()
+        }
 
         do {
             let ids: [String]
@@ -192,6 +283,9 @@ final class SpotifyImportStore {
             try await resolveTier1Chunked(ids: ids)
             guard importSession == session else { return }
             // Phase B: serial matching (throttle-proven) with inter-search pacing.
+            let matchStart = Date()
+            matchProgressState = (done: 0, total: ids.count, start: matchStart)
+            startProgressTicker()
             for (idx, trackID) in ids.enumerated() {
                 try Task.checkCancellation()
                 guard importSession == session else { return }
@@ -199,11 +293,15 @@ final class SpotifyImportStore {
                     try await Task.sleep(nanoseconds: UInt64(Self.interSearchDelay * 1_000_000_000))
                     guard importSession == session else { return }
                 }
-                if ids.count > 1 { progress = "Matching \(done + 1)/\(ids.count)…" }
-                else { progress = "Matching…" }
+                matchProgressState = (done: done, total: ids.count, start: matchStart)
+                progress = Self.matchingProgress(
+                    done: done, total: ids.count,
+                    elapsed: Date().timeIntervalSince(matchStart))
                 await matchRow(at: idx, id: trackID)
                 done += 1
             }
+            matchProgressState = nil
+            stopProgressTicker()
         } catch is CancellationError {
             guard importSession == session else { return }
             errorMessage = nil
@@ -285,6 +383,7 @@ final class SpotifyImportStore {
         // (Retry paths reset to .working first.)
         if case .matched = tracks[idx].status { return }
         if case .failed = tracks[idx].status { return }
+        matchingStartedAt[id] = Date()
 
         // Session memo: same recording, same answer.
         if let m = memo[id] {
@@ -407,6 +506,7 @@ final class SpotifyImportStore {
     private func applyMatch(idx: Int, score: Double, youtubeID: String,
                             youtubeTitle: String, duration: Double?, exact: Bool) {
         guard tracks.indices.contains(idx) else { return }
+        matchingStartedAt.removeValue(forKey: tracks[idx].id)
         tracks[idx].status = .matched(score: score, youtubeID: youtubeID,
                                       youtubeTitle: youtubeTitle,
                                       duration: duration, exact: exact)
@@ -429,6 +529,8 @@ final class SpotifyImportStore {
         let task = Task {
             tracks[idx].status = .working
             tracks[idx].selected = false
+            matchingStartedAt[id] = Date()
+            matchProgressState = nil
             await matchRow(at: idx, id: id)
         }
         importTask = task
