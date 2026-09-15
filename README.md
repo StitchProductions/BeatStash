@@ -13,17 +13,15 @@ Turn YouTube links and Spotify playlists into a tagged local music library — o
 
 | New Batch | Queue |
 |---|---|
-| ![New Batch — screenshot coming soon](docs/screenshots/new-batch.png) | ![Queue — screenshot coming soon](docs/screenshots/queue.png) |
+| ![New Batch](docs/screenshots/new-batch.png) | ![Queue](docs/screenshots/queue.png) |
 
 | History | Spotify |
 |---|---|
-| ![History — screenshot coming soon](docs/screenshots/history.png) | ![Spotify — screenshot coming soon](docs/screenshots/spotify.png) |
+| ![History](docs/screenshots/history.png) | ![Spotify](docs/screenshots/spotify.png) |
 
 | Settings |
 |---|
-| ![Settings — screenshot coming soon](docs/screenshots/settings.png) |
-
-> Screenshots land here as `docs/screenshots/<tab>.png` — same filenames, no README edits needed.
+| ![Settings](docs/screenshots/settings.png) |
 
 ## What it does
 
@@ -54,12 +52,12 @@ open BeatStash.xcodeproj         # or: xcodebuild test -scheme BeatStash -destin
 Make a release DMG:
 
 ```sh
-scripts/package-dmg.sh --version 1.0.0   # → dist/BeatStash-1.0.0.dmg
+scripts/package-dmg.sh --version <version>   # → dist/BeatStash-<version>.dmg
 ```
 
 ## Tests
 
-100+ tests across 12 suites (`BeatStashTests/`), run on every push via GitHub Actions — see the badge above. Run them locally:
+100+ tests (`BeatStashTests/`), run on every push via GitHub Actions — see the badge above. Run them locally:
 
 ```sh
 xcodebuild test -scheme BeatStash -destination 'platform=macOS'
@@ -83,7 +81,7 @@ BeatStash stands on excellent open-source work — thank you:
 - **YouTube** — extraction and search via yt-dlp, plus oEmbed for instant titles.
 - **Spotify** — public playlist pages and oEmbed for track metadata.
 - **Deezer** — search anchor for durations and album names.
-- **GitHub API** — yt-dlp release checks behind the self-updater.
+- **GitHub API** — yt-dlp + BeatStash release checks behind both self-updaters.
 
 Full license details in [Third-Party-Notices.md](Third-Party-Notices.md). If you redistribute BeatStash with FFmpeg binaries, honor the applicable GPL/LGPL source-offer requirements noted there.
 
