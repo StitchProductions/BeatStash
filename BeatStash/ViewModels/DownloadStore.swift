@@ -164,14 +164,19 @@ final class DownloadStore {
         }
     }
 
-    /// Post-launch currency check. Surfaces a new version (or a
-    /// stale-aware banner on failure) without ever blocking the UI.
-    /// Skips the second bootstrap unless the version actually changed —
-    /// the launch-time state is already current otherwise.
+    /// Post-launch currency checks (yt-dlp + the app itself). Surfaces new
+    /// versions without ever blocking the UI. Skips the second bootstrap
+    /// unless yt-dlp actually changed — the launch-time state is already
+    /// current otherwise.
     private func refreshCurrencyInBackground() async {
         let outcome = await BinaryManager.shared.checkAndUpdateIfNeeded(ignoreCache: true)
         if case .updated = outcome {
             await bootstrap()
+        }
+        // App update last: a newer BeatStash outranks yt-dlp trivia, and
+        // failures stay silent (no release yet, offline, rate-limited).
+        if case .available(let v, _) = await AppUpdater.checkForAppUpdate() {
+            setupMessage = "BeatStash v\(v) is available — see Settings → App updates to download."
         }
     }
 

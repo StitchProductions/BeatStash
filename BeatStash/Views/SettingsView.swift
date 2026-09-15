@@ -19,6 +19,9 @@ struct SettingsView: View {
     @State private var isUpdating = false
     @State private var isChecking = false
     @State private var isInstalling = false
+    @State private var appChecking = false
+    @State private var appUpdateStatus: String?
+    @State private var appUpdateURL: URL?
     @State private var toolsLoaded = false
     @State private var ffmpegFound: Bool?
     @State private var jsRuntime: String?
@@ -181,6 +184,39 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("App updates") {
+                HStack {
+                    Text("BeatStash")
+                    Spacer()
+                    Text(appVersionDisplay)
+                        .foregroundStyle(.secondary)
+                        .font(.callout)
+                }
+                HStack {
+                    Button(appChecking ? "Checking…" : "Check for app updates") {
+                        appChecking = true
+                        Task {
+                            await checkAppUpdate()
+                            appChecking = false
+                        }
+                    }
+                    .disabled(appChecking)
+                    if let url = appUpdateURL {
+                        Button("Download update") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                }
+                if let status = appUpdateStatus {
+                    Text(status)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Text("The app checks once a day on launch and never installs anything itself — download the new DMG and replace BeatStash in Applications.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("YouTube sign-in & bot-check") {
                 Picker("Cookies", selection: $cookieModeRaw) {
                     ForEach(YouTubeAuth.CookieMode.allCases) { m in
@@ -293,6 +329,27 @@ struct SettingsView: View {
     }
 
     // MARK: - Tools state
+
+    private var appVersionDisplay: String {
+        AppUpdater.currentVersion().map { "v\($0)" } ?? "unknown"
+    }
+
+    private func checkAppUpdate() async {
+        switch await AppUpdater.checkForAppUpdate(ignoreCache: true) {
+        case .upToDate(let v):
+            appUpdateStatus = "BeatStash is up to date (v\(v))."
+            appUpdateURL = nil
+        case .available(let v, let url):
+            appUpdateStatus = "BeatStash v\(v) is available — download it below."
+            appUpdateURL = url
+        case .skipped(let r):
+            appUpdateStatus = r
+            appUpdateURL = nil
+        case .failed(let m):
+            appUpdateStatus = "Couldn't check for updates (\(m))"
+            appUpdateURL = nil
+        }
+    }
 
     private var channelName: String {
         (BinaryManager.Channel(rawValue: channelRaw) ?? .stable).displayName.lowercased()
