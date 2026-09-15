@@ -137,6 +137,9 @@ public actor YTDLPService: Sendable {
     }
 
     /// Full-data hit from a previous fetch, or nil (miss/expired).
+    /// Self-healing: playlist entries cached before `thumbnails[]` support
+    /// carry no artwork at all — treat those as a miss so one fresh flat
+    /// probe repopulates covers (then re-caches with art).
     public func diskCachedProbe(for url: String) async -> ProbeResult? {
         if diskCache == nil {
             diskCache = await Self.readDiskCacheFile()
@@ -144,6 +147,10 @@ public actor YTDLPService: Sendable {
         let key = Self.probeCacheKey(url)
         guard let e = diskCache?[key],
               Date().timeIntervalSince(e.at) < Self.diskCacheTTL else { return nil }
+        if case .playlist(_, let entries) = e.result, !entries.isEmpty,
+           entries.allSatisfy({ $0.thumbnail == nil && ($0.thumbnails?.isEmpty ?? true) }) {
+            return nil
+        }
         return e.result
     }
 
@@ -341,6 +348,7 @@ public actor YTDLPService: Sendable {
             entries[i] = PlaylistEntry(
                 id: entries[i].id, title: entries[i].title, url: entries[i].url,
                 duration: entries[i].duration, thumbnail: entries[i].thumbnail,
+                thumbnails: entries[i].thumbnails,
                 uploader: entries[i].uploader, playlistIndex: i + 1
             )
         }

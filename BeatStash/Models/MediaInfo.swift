@@ -9,6 +9,9 @@ public struct MediaInfo: Codable, Sendable {
     public var channel: String?
     public var duration: Double?
     public var thumbnail: String?
+    /// Plural `thumbnails[]` array (flat-playlist shape). Resolved via
+    /// `resolvedThumbnail` — singular wins, else widest variant.
+    public var thumbnails: [YTDlpThumbnail]? = nil
     public var webpageURL: String?
     public var uploadDate: String? // yyyyMMdd
     public var playlistTitle: String?
@@ -29,6 +32,11 @@ public struct MediaInfo: Codable, Sendable {
     public var safeTitle: String { title ?? id ?? "Unknown title" }
     public var safeUploader: String { uploader ?? channel ?? "" }
 
+    /// Display thumbnail: singular `thumbnail`, else best of `thumbnails[]`.
+    public var resolvedThumbnail: String? {
+        preferredThumbnailURL(singular: thumbnail, from: thumbnails)
+    }
+
     /// Year from `upload_date` (yyyyMMdd → yyyy).
     public var year: String? {
         guard let d = uploadDate, d.count >= 4 else { return nil }
@@ -44,13 +52,39 @@ public struct MediaInfo: Codable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, uploader, channel, duration, thumbnail, formats
+        case id, title, uploader, channel, duration, thumbnail, thumbnails, formats
         case webpageURL = "webpage_url"
         case uploadDate = "upload_date"
         case playlistTitle = "playlist_title"
         case playlistIndex = "playlist_index"
         case type = "_type"
     }
+}
+
+/// One thumbnail variant from yt-dlp's plural `thumbnails[]` array
+/// (what `--flat-playlist --dump-json` emits — no singular `thumbnail` key).
+/// Dimensions are optional; order is typically ascending by size.
+public struct YTDlpThumbnail: Codable, Sendable {
+    public var url: String?
+    public var width: Int?
+    public var height: Int?
+}
+
+/// Preferred display thumbnail: singular `thumbnail` wins, else the widest
+/// entry of `thumbnails[]` (later wins ties, so dimension-less lists resolve
+/// to the last — largest — variant).
+nonisolated func preferredThumbnailURL(
+    singular: String?, from list: [YTDlpThumbnail]?
+) -> String? {
+    if let singular, !singular.isEmpty { return singular }
+    var best: String?
+    var bestWidth = -1
+    for t in list ?? [] {
+        guard let u = t.url, !u.isEmpty else { continue }
+        let w = t.width ?? t.height ?? 0
+        if w >= bestWidth { bestWidth = w; best = u }
+    }
+    return best
 }
 
 /// One format entry. Deliberately minimal: only what download planning needs
@@ -72,10 +106,18 @@ public struct PlaylistEntry: Codable, Sendable, Identifiable {
     public var url: String?
     public var duration: Double?
     public var thumbnail: String?
+    /// Plural `thumbnails[]` array (flat-playlist shape). Resolved via
+    /// `resolvedThumbnail` — singular wins, else widest variant.
+    public var thumbnails: [YTDlpThumbnail]? = nil
     public var uploader: String?
     public var playlistIndex: Int?
     /// Playlist-level title echoed into flat entries by yt-dlp (may be absent).
     public var playlistTitle: String?
+
+    /// Display thumbnail: singular `thumbnail`, else best of `thumbnails[]`.
+    public var resolvedThumbnail: String? {
+        preferredThumbnailURL(singular: thumbnail, from: thumbnails)
+    }
 
     public var webpageURL: String {
         if let url, url.hasPrefix("http") { return url }
@@ -93,7 +135,7 @@ public struct PlaylistEntry: Codable, Sendable, Identifiable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, title, url, duration, thumbnail, uploader
+        case id, title, url, duration, thumbnail, thumbnails, uploader
         case playlistIndex = "playlist_index"
         case playlistTitle = "playlist_title"
     }

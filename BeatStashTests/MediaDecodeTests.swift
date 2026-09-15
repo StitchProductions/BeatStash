@@ -70,8 +70,86 @@ struct MediaDecodeTests {
         #expect(entries?.first?.playlistTitle == "L")
     }
 
+    @Test func flatBlobCarriesThumbnailsArray() {
+        let blob = """
+            {"id":"a","title":"One","playlist_title":"L","playlist_index":1,"thumbnails":[{"url":"https://example.com/a-small.jpg","width":168},{"url":"https://example.com/a-big.jpg","width":336}]}
+            """
+        let entries = YTDLPService.parseFlatEntries(from: blob)
+        #expect(entries?.first?.resolvedThumbnail == "https://example.com/a-big.jpg")
+    }
+
+    @Test func artlessCachedPlaylistReprobes() async {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("BeatStashTests-\(UUID().uuidString)", isDirectory: true)
+        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        YTDLPService.diskCacheFileOverride = dir.appendingPathComponent("probe-cache.json")
+        defer { YTDLPService.diskCacheFileOverride = nil }
+        func writeCache(_ entriesJSON: String) {
+            let at = String(data: try! JSONEncoder().encode(Date()), encoding: .utf8)!
+            try! """
+            {"https://www.youtube.com/playlist?list=PLtest":{"at":\(at),"result":{"kind":"playlist","title":"L","entries":\(entriesJSON)}}}
+            """.write(to: YTDLPService.diskCacheFileOverride!, atomically: true, encoding: .utf8)
+        }
+        // Old-style entry (cached before thumbnails[] support): miss → re-probe.
+        writeCache(#"[{"id":"a","title":"One","playlist_index":1}]"#)
+        #expect(await YTDLPService().diskCachedProbe(
+            for: "https://www.youtube.com/playlist?list=PLtest") == nil)
+        // New-style entry carrying art: hit.
+        writeCache(#"[{"id":"a","title":"One","playlist_index":1,"thumbnails":[{"url":"https://example.com/a.jpg","width":336}]}]"#)
+        let hit = await YTDLPService().diskCachedProbe(
+            for: "https://www.youtube.com/playlist?list=PLtest")
+        if case .playlist(_, let entries)? = hit {
+            #expect(entries.first?.resolvedThumbnail == "https://example.com/a.jpg")
+        } else {
+            Issue.record("expected a cached playlist hit")
+        }
+    }
+
     @Test func flatBlobWithoutIndexIsSingle() {
         #expect(YTDLPService.parseFlatEntries(from: #"{"id":"a","title":"One"}"#) == nil)
         #expect(YTDLPService.parseFlatEntries(from: "") == nil)
+    }
+
+    @Test func flatEntryThumbnailsArrayResolves() {
+        // Real `--flat-playlist` shape: plural `thumbnails[]`, no singular key.
+        let e = try! JSONDecoder().decode(PlaylistEntry.self, from: Data("""
+            {"id":"ekr2nIex040","title":"APT.","playlist_title":"Pop",
+             "playlist_index":1,
+             "thumbnails":[{"url":"https://i.ytimg.com/vi/ekr2nIex040/hqdefault.jpg","width":168,"height":94},
+                           {"url":"https://i.ytimg.com/vi/ekr2nIex040/maxresdefault.jpg","width":336,"height":188}]}
+            """.utf8))
+        #expect(e.thumbnail == nil)
+        #expect(e.resolvedThumbnail == "https://i.ytimg.com/vi/ekr2nIex040/maxresdefault.jpg")
+    }
+
+    @Test func singularThumbnailWinsOverArray() {
+        let e = try! JSONDecoder().decode(PlaylistEntry.self, from: Data("""
+            {"id":"x","thumbnail":"https://example.com/single.jpg",
+             "thumbnails":[{"url":"https://example.com/big.jpg","width":640}]}
+            """.utf8))
+        #expect(e.resolvedThumbnail == "https://example.com/single.jpg")
+    }
+
+    @Test func dimensionlessThumbnailsResolveToLast() {
+        let e = try! JSONDecoder().decode(PlaylistEntry.self, from: Data("""
+            {"id":"x","thumbnails":[{"url":"https://example.com/a.jpg"},
+                                    {"url":"https://example.com/b.jpg"}]}
+            """.utf8))
+        #expect(e.resolvedThumbnail == "https://example.com/b.jpg")
+    }
+
+    @Test func noThumbnailsResolvesNil() {
+        let e = try! JSONDecoder().decode(PlaylistEntry.self, from: Data("""
+            {"id":"x","title":"T"}
+            """.utf8))
+        #expect(e.resolvedThumbnail == nil)
+    }
+
+    @Test func mediaInfoThumbnailsArrayResolves() {
+        let m = try! JSONDecoder().decode(MediaInfo.self, from: Data("""
+            {"id":"x","thumbnails":[{"url":"https://example.com/a.jpg","width":120}]}
+            """.utf8))
+        #expect(m.resolvedThumbnail == "https://example.com/a.jpg")
     }
 }

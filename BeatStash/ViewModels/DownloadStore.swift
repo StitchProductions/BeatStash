@@ -471,7 +471,7 @@ final class DownloadStore {
             url: url,
             kind: batchMode,
             displayTitle: media.safeTitle,
-            thumbnailURL: media.thumbnail,
+            thumbnailURL: media.resolvedThumbnail,
             duration: media.duration,
             audioFormat: batchFormat,
             videoQuality: videoQuality,
@@ -494,7 +494,7 @@ final class DownloadStore {
                 playlistTitle: title,
                 playlistIndex: e.playlistIndex,
                 displayTitle: e.safeTitle,
-                thumbnailURL: e.thumbnail,
+                thumbnailURL: e.resolvedThumbnail,
                 duration: e.duration,
                 audioFormat: batchFormat,
                 tags: tags
@@ -559,7 +559,7 @@ final class DownloadStore {
             case .single(let media)?:
                 if let i = jobs.firstIndex(where: { $0.url == o.url && $0.playlistTitle == nil }) {
                     jobs[i].duration = media.duration
-                    jobs[i].thumbnailURL = media.thumbnail
+                    jobs[i].thumbnailURL = media.resolvedThumbnail
                     if !jobs[i].tagsEdited {
                         jobs[i].displayTitle = media.safeTitle
                         jobs[i].tags = TagParser.parse(
