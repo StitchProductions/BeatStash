@@ -9,6 +9,22 @@ Turn YouTube links and Spotify playlists into a tagged local music library — o
 ![macOS 15+](https://img.shields.io/badge/macOS-15%2B-blue.svg)
 ![Release](https://img.shields.io/github/v/release/StitchProductions/BeatStash)
 
+## Screenshots
+
+| New Batch | Queue |
+|---|---|
+| ![New Batch — screenshot coming soon](docs/screenshots/new-batch.png) | ![Queue — screenshot coming soon](docs/screenshots/queue.png) |
+
+| History | Spotify |
+|---|---|
+| ![History — screenshot coming soon](docs/screenshots/history.png) | ![Spotify — screenshot coming soon](docs/screenshots/spotify.png) |
+
+| Settings |
+|---|
+| ![Settings — screenshot coming soon](docs/screenshots/settings.png) |
+
+> Screenshots land here as `docs/screenshots/<tab>.png` — same filenames, no README edits needed.
+
 ## What it does
 
 - **New Batch** — paste YouTube links or bare video IDs (one per line, comma- or space-separated), probe them, then Fetch info or Download. Playlists, Shorts, and single videos supported.
