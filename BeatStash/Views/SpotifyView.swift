@@ -4,7 +4,6 @@ import AppKit
 struct SpotifyView: View {
     @Environment(SpotifyImportStore.self) private var imports
     @Environment(DownloadStore.self) private var store
-    @AppStorage("spotifyConfidenceCheckEnabled") private var confidenceCheckEnabled = false
 
     var body: some View {
         @Bindable var imports = imports
@@ -13,7 +12,7 @@ struct SpotifyView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Spotify playlist or track")
                     .font(.headline)
-                Text("Paste a public playlist link — each song is matched to its YouTube video. No login or API key needed.")
+                Text("Paste a public playlist link — each song resolves in seconds, then lands in New Batch as a YouTube search that grabs the first result. No login or API key needed.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 HStack(alignment: .top) {
@@ -82,7 +81,7 @@ struct SpotifyView: View {
                         imports.setAllSelectable(!imports.allSelectableSelected)
                     }
                     .buttonStyle(.link)
-                    .disabled(imports.matchedCount == 0)
+                    .disabled(imports.resolvedCount == 0)
                     Button("Clear all") {
                         imports.clearTracks()
                     }
@@ -90,10 +89,10 @@ struct SpotifyView: View {
                     .help("Remove all imported tracks — your pasted link stays")
                     Text("•")
                         .foregroundStyle(.secondary)
-                    Text("\(imports.selectedMatchedCount) of \(imports.tracks.count) selected")
+                    Text("\(imports.selectedResolvedCount) of \(imports.tracks.count) selected")
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Text("\(imports.matchedCount) matched")
+                    Text("\(imports.resolvedCount) resolved")
                         .foregroundStyle(.secondary)
                     if imports.failedCount > 0, !imports.isImporting {
                         Button("Retry failed (\(imports.failedCount))") {
@@ -115,13 +114,11 @@ struct SpotifyView: View {
 
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(confidenceCheckEnabled
-                            ? "Match % = title, artist authority, duration anchor, MusicBrainz exact links. Unticked rows need review."
-                            : "Match % = title, artist authority and duration anchor. Unticked rows need review.")
+                        Text("First YouTube result wins per song — untick anything that looks wrong before adding.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         if imports.isImporting {
-                            Text("Matching… Add is available when done.")
+                            Text("Resolving… Add is available when done.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -130,11 +127,11 @@ struct SpotifyView: View {
                     Button {
                         _ = imports.addSelectedToBatch(store)
                     } label: {
-                        Label("Add \(imports.selectedMatchedCount) to New Batch", systemImage: "plus.circle.fill")
+                        Label("Add \(imports.selectedResolvedCount) to New Batch", systemImage: "plus.circle.fill")
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(!imports.canAddToBatch)
-                    .help(imports.isImporting ? "Wait until matching finishes" : "Add selected matches to New Batch")
+                    .help(imports.isImporting ? "Wait until resolving finishes" : "Add selected songs to New Batch")
                 }
                 .padding()
                 .background(.bar)
@@ -147,7 +144,7 @@ struct SpotifyView: View {
                     Text("Import a Spotify playlist")
                         .font(.headline)
                         .foregroundStyle(.secondary)
-                    Text("Songs resolve to YouTube one by one — then add the good matches to your downloads.")
+                    Text("Songs resolve in seconds — then add them to your downloads.")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
@@ -161,16 +158,12 @@ struct SpotifyView: View {
 struct SpotifyTrackRow: View {
     @Environment(SpotifyImportStore.self) private var imports
     @Binding var track: SpotifyImportTrack
-    @State private var now = Date()
-    // Live refresh when the toggle flips (the store's computed flag alone
-    // would not invalidate the view).
-    @AppStorage("spotifyConfidenceCheckEnabled") private var confidenceCheckEnabled = false
 
     var body: some View {
         HStack(spacing: 10) {
             Toggle("", isOn: $track.selected)
                 .toggleStyle(.checkbox)
-                .disabled(!isMatched)
+                .disabled(!isResolved)
             if let art = track.artworkURL, let url = URL(string: art) {
                 AsyncImage(url: url) { image in
                     image.resizable().scaledToFill()
@@ -199,8 +192,8 @@ struct SpotifyTrackRow: View {
         .padding(.vertical, 2)
     }
 
-    private var isMatched: Bool {
-        if case .matched = track.status { return true }
+    private var isResolved: Bool {
+        if case .resolved = track.status { return true }
         return false
     }
 
@@ -208,40 +201,12 @@ struct SpotifyTrackRow: View {
     private var statusLine: some View {
         switch track.status {
         case .working:
-            Text("Matching…\(SpotifyImportStore.matchingElapsedSuffix(since: imports.matchingStartedAt[track.id], now: now))")
+            Text("Resolving…")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .task {
-                    // Ticks the elapsed suffix while this row is working;
-                    // cancelled automatically when the row settles.
-                    while !Task.isCancelled {
-                        try? await Task.sleep(nanoseconds: 1_000_000_000)
-                        now = Date()
-                    }
-                }
-        case .matched(let score, _, let ytTitle, _, let exact):
-            HStack(spacing: 6) {
-                // No score UI at all with the check off (nil badge). On-state
-                // styling is unchanged from before.
-                if let badge = SpotifyImportStore.confidenceBadgeText(
-                    score: score, exact: exact, enabled: confidenceCheckEnabled) {
-                    if exact {
-                        Text(badge)
-                            .font(.caption2.bold())
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(.green.opacity(0.2), in: Capsule())
-                            .foregroundStyle(.green)
-                    } else {
-                        Text(badge)
-                            .font(.caption2.monospaced())
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(.tint.opacity(0.15), in: Capsule())
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                Text(ytTitle)
+        case .resolved:
+            if let album = track.deezerAlbum, !album.isEmpty {
+                Text(album)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)

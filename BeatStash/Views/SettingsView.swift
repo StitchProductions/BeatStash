@@ -14,7 +14,6 @@ struct SettingsView: View {
     @AppStorage("ytAuth.poToken") private var poToken: String = ""
     @AppStorage("ytAuth.forceIPv4") private var forceIPv4: Bool = true
     @AppStorage("ytDlpChannel") private var channelRaw: String = BinaryManager.Channel.stable.rawValue
-    @AppStorage("spotifyConfidenceCheckEnabled") private var confidenceCheckEnabled: Bool = false
 
     @State private var updateOutput: String?
     @State private var isUpdating = false
@@ -59,11 +58,7 @@ struct SettingsView: View {
             }
 
             Section("Spotify") {
-                Toggle("Confidence check (MusicBrainz)", isOn: $confidenceCheckEnabled)
-                Text("Each song always needs its ~10–15s YouTube search, on or off — this only adds MusicBrainz cross-checks on uncertain matches.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text("Off by default. Matches use title, artist and duration only. When on, uncertain matches get a MusicBrainz cross-check that can upgrade to Exact.")
+                Text("Songs resolve from Spotify in seconds and land in New Batch as YouTube searches that grab the first result. Review drafts by eye before downloading.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

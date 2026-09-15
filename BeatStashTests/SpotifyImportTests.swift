@@ -186,40 +186,12 @@ struct SpotifyImportTests {
         #expect(pruned["spotify:track1"] != nil)
     }
 
-    // MARK: - Matching progress labels
+    // MARK: - Handoff search URLs (first result wins, no scoring)
 
-    @Test func matchingProgressLabels() {
-        #expect(SpotifyImportStore.matchingProgress(done: 0, total: 1, elapsed: 0) == "Matching…")
-        #expect(SpotifyImportStore.matchingProgress(done: 0, total: 58, elapsed: 0) == "Matching 1/58…")
-        // Elapsed ticks only once the wait is real (≥2s).
-        #expect(SpotifyImportStore.matchingProgress(done: 0, total: 58, elapsed: 1) == "Matching 1/58…")
-        #expect(SpotifyImportStore.matchingProgress(done: 11, total: 58, elapsed: 192) == "Matching 12/58… · 3:12")
-    }
-
-    @Test func matchingElapsedSuffix() {
-        let now = Date()
-        #expect(SpotifyImportStore.matchingElapsedSuffix(since: nil, now: now) == "")
-        #expect(SpotifyImportStore.matchingElapsedSuffix(since: now, now: now) == "")
-        #expect(SpotifyImportStore.matchingElapsedSuffix(
-            since: now.addingTimeInterval(-45), now: now) == " · 0:45")
-    }
-
-    @Test func elapsedString() {
-        #expect(SpotifyImportStore.elapsedString(0) == "0:00")
-        #expect(SpotifyImportStore.elapsedString(65) == "1:05")
-    }
-
-    // MARK: - Confidence badges follow the toggle
-
-    @Test func badgeHiddenWhenCheckOff() {
-        // Off means no score UI at all — even for would-be Exact rows.
-        #expect(SpotifyImportStore.confidenceBadgeText(score: 0.87, exact: false, enabled: false) == nil)
-        #expect(SpotifyImportStore.confidenceBadgeText(score: 1.0, exact: true, enabled: false) == nil)
-    }
-
-    @Test func badgeTextWhenCheckOn() {
-        #expect(SpotifyImportStore.confidenceBadgeText(score: 0.87, exact: false, enabled: true) == "87% confidence")
-        #expect(SpotifyImportStore.confidenceBadgeText(score: 1.0, exact: true, enabled: true) == "Exact")
+    @Test func searchURLShapes() {
+        #expect(SpotifyImportStore.searchURL(artist: "Adele", title: "Hello") == "ytsearch1:Adele Hello")
+        #expect(SpotifyImportStore.searchURL(artist: "", title: "Hello") == "ytsearch1:Hello")
+        #expect(SpotifyImportStore.searchURL(artist: "  ", title: "  Hello  ") == "ytsearch1:Hello")
     }
 
 }
