@@ -762,7 +762,9 @@ public actor YTDLPService: Sendable {
         process.standardOutput = outPipe
         process.standardError = errPipe
         active[job.id] = ProcessBox(process)
-        let box = active[job.id]!
+        guard let box = active[job.id] else {
+            throw ServiceError.downloadFailed("couldn't track the download process")
+        }
 
         // Serialize extraction: concurrent player-API extractions throttle
         // each other. Released on first progress (bytes flowing → the slow
@@ -783,6 +785,13 @@ public actor YTDLPService: Sendable {
             let jobID = job.id
             let clearActive: @Sendable () -> Void = { [weak self] in
                 Task { await self?.clearActive(id: jobID) }
+            }
+            // Identity-guarded clear: chain fallback overwrites active[jobID]
+            // with the next attempt's process, so an async clear from a dead
+            // attempt must never wipe the live one (orphaning a process the
+            // Cancel button can no longer reach).
+            let clearActiveIfCurrent: @Sendable (Process) -> Void = { [weak self] proc in
+                Task { await self?.clearActiveIfCurrent(id: jobID, is: proc) }
             }
             let lines = ProgressLineBuffer()
             let sawOutput = LockedFlag()
@@ -823,7 +832,7 @@ public actor YTDLPService: Sendable {
             process.terminationHandler = { proc in
                 finished.set()
                 outHandle.readabilityHandler = nil
-                clearActive()
+                clearActiveIfCurrent(proc)
                 releaseExtractionOnce()
                 if timedOut.value {
                     gate.resume(throwing: ServiceError.probeTimeout(Self.downloadFirstOutputTimeout))
@@ -853,20 +862,39 @@ public actor YTDLPService: Sendable {
                 try process.run()
             } catch {
                 finished.set()
+                // A failed launch leaves a never-launched Process behind:
+                // clear it here or a later cancel() would terminate() it and
+                // take the whole app down (NSInvalidArgumentException).
+                clearActive()
                 releaseExtractionOnce()
                 gate.resume(throwing: error)
             }
         }
     }
 
+    /// terminate() throws an uncatchable NSInvalidArgumentException on a
+    /// never-launched task. Every terminate site must go through here (or
+    /// check isRunning first). Terminating a launched-then-exited task is a
+    /// documented no-op, so the check-then-act race is benign.
+    nonisolated static func safeTerminate(_ process: Process) {
+        if process.isRunning { process.terminate() }
+    }
+
     public func cancel(id: UUID) {
-        active[id]?.process.terminate()
+        if let box = active[id] { Self.safeTerminate(box.process) }
         active.removeValue(forKey: id)
         finishedPaths.removeValue(forKey: id)
     }
 
     private func clearActive(id: UUID) {
         active.removeValue(forKey: id)
+    }
+
+    /// Removes the entry only if it still tracks this exact process instance.
+    private func clearActiveIfCurrent(id: UUID, is process: Process) {
+        if active[id]?.process === process {
+            active.removeValue(forKey: id)
+        }
     }
 
     // MARK: - Argument builders (public for testing / preview)
@@ -949,6 +977,34 @@ public actor YTDLPService: Sendable {
     nonisolated static func thumbnailEmbedArgs(for format: AudioFormat) -> [String] {
         guard format != .wav else { return [] }
         return ["--embed-thumbnail", "--convert-thumbnails", "jpg"]
+    }
+
+    /// Image extensions yt-dlp thumbnail downloads leave behind on failed runs.
+    nonisolated static let thumbnailResidueExtensions: Set<String> = ["jpg", "jpeg", "png", "webp"]
+
+    /// Finds probable yt-dlp thumbnail leftovers next to a finished download:
+    /// same file stem as the output, image extension, born during this job's
+    /// run window. User-placed art (different stem, or predating the run) is
+    /// never listed, nor is the output itself or hidden files. Directory +
+    /// attribute reads only — testable with a temp-dir fixture.
+    nonisolated static func thumbnailResidueCandidates(
+        output: URL, in dir: URL, since: Date
+    ) -> [URL] {
+        let stem = output.deletingPathExtension().lastPathComponent
+        guard !stem.isEmpty,
+              let items = try? FileManager.default.contentsOfDirectory(
+                  at: dir, includingPropertiesForKeys: [.contentModificationDateKey],
+                  options: [.skipsHiddenFiles])
+        else { return [] }
+        return items.filter { url in
+            guard url != output,
+                  url.deletingPathExtension().lastPathComponent == stem,
+                  thumbnailResidueExtensions.contains(url.pathExtension.lowercased())
+            else { return false }
+            let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey])
+                .contentModificationDate) ?? .distantPast
+            return mtime >= since
+        }.sorted { $0.path < $1.path }
     }
 
     /// Shared probe prefix: hardening + auth + client + optional POT plugin.

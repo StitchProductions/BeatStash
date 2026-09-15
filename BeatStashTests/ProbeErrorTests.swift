@@ -249,4 +249,24 @@ struct ProbeErrorTests {
         #expect(YTDLPService.shortReason(for: e) == "can't carry cover art")
         #expect(!YTDLPService.shortReason(for: e).contains("android"))
     }
+
+    @Test func safeTerminateNeverLaunchedDoesNotThrow() {
+        // Regression: terminate() on a never-launched Process raises an
+        // uncatchable NSInvalidArgumentException that took the whole app
+        // down via cancel-all. Survival of this call IS the assertion.
+        YTDLPService.safeTerminate(Process())
+        let launched = Process()
+        launched.executableURL = URL(fileURLWithPath: "/bin/true")
+        launched.standardOutput = Pipe()
+        launched.standardError = Pipe()
+        try? launched.run()
+        launched.waitUntilExit()
+        // Exited-but-launched: documented no-op, must also survive.
+        YTDLPService.safeTerminate(launched)
+    }
+
+    @Test func cancelUnknownJobIsNoop() async {
+        // No entry registered: must quietly do nothing, never crash.
+        await YTDLPService().cancel(id: UUID())
+    }
 }

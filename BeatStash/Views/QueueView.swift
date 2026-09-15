@@ -136,12 +136,21 @@ struct QueueRowView: View {
 
     private func reveal(_ job: DownloadJob) {
         guard let p = job.outputPath else { return }
+        let fm = FileManager.default
         // outputPath may be a directory (when newest-file resolution failed) — handle both.
         var isDir: ObjCBool = false
-        if FileManager.default.fileExists(atPath: p, isDirectory: &isDir), !isDir.boolValue {
+        if fm.fileExists(atPath: p, isDirectory: &isDir), !isDir.boolValue {
             NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: p)])
-        } else {
+        } else if isDir.boolValue {
             NSWorkspace.shared.open(URL(fileURLWithPath: p))
+        } else {
+            // File moved/deleted since download: reveal the parent when it
+            // exists instead of handing Finder a dead URL.
+            let parent = URL(fileURLWithPath: p).deletingLastPathComponent().path
+            var parentIsDir: ObjCBool = false
+            if fm.fileExists(atPath: parent, isDirectory: &parentIsDir), parentIsDir.boolValue {
+                NSWorkspace.shared.open(URL(fileURLWithPath: parent))
+            }
         }
     }
 }

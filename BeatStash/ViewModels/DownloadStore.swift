@@ -786,6 +786,7 @@ final class DownloadStore {
         runningCount += 1
         let job = queue[idx]
         let dir = URL(fileURLWithPath: job.outputPath ?? destination.path)
+        let runStart = preparingInfo[jobID] ?? Date()
         startPreparingTicker(jobID)
 
         Task {
@@ -845,6 +846,17 @@ final class DownloadStore {
                     // exact path confirmed — no scan needed.
                 } else {
                     resolvedPath = await self.newestPath(in: dir)
+                }
+                // WAV never embeds covers, so any same-stem image born during
+                // this run is thumbnail residue from a failed/old flow — sweep
+                // it so the music folder holds just the audio. Best-effort;
+                // user art (other stems, older mtimes) is never touched.
+                if job.kind == .audio, job.audioFormat == .wav, let p = resolvedPath {
+                    let outputURL = URL(fileURLWithPath: p)
+                    for residue in YTDLPService.thumbnailResidueCandidates(
+                        output: outputURL, in: dir, since: runStart) {
+                        try? FileManager.default.removeItem(at: residue)
+                    }
                 }
                 await MainActor.run {
                     self.preparingIDs.remove(jobID)
