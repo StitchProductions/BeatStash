@@ -256,6 +256,7 @@ final class SpotifyImportStore {
             if importSession == session { isImporting = false }
             progress = nil
             stopProgressTicker()
+            flushMatchCache()
         }
 
         do {
@@ -486,7 +487,9 @@ final class SpotifyImportStore {
         }
     }
 
-    /// Writes a match to row + session memo + disk cache.
+    /// Writes a match to row + session memo + in-memory disk set.
+    /// Disk persists once per import (`flushMatchCache`), not per track —
+    /// per-track rewrites are O(N²) on large playlists for identical content.
     private func recordMatch(idx: Int, id: String, score: Double, youtubeID: String,
                              youtubeTitle: String, duration: Double?, exact: Bool) {
         memo[id] = Memo(title: tracks[idx].title, artist: tracks[idx].artist,
@@ -498,9 +501,15 @@ final class SpotifyImportStore {
                                 youtubeTitle: youtubeTitle, duration: duration,
                                 exact: exact)
         diskMatches = cache
-        YouTubeMatcher.writeMatchCache(cache)
         applyMatch(idx: idx, score: score, youtubeID: youtubeID,
                    youtubeTitle: youtubeTitle, duration: duration, exact: exact)
+    }
+
+    /// Single persist for the accumulated matches (end of import / retry).
+    private func flushMatchCache() {
+        if let cache = diskMatches {
+            YouTubeMatcher.writeMatchCache(cache)
+        }
     }
 
     private func applyMatch(idx: Int, score: Double, youtubeID: String,
@@ -525,7 +534,7 @@ final class SpotifyImportStore {
         importSession = session
         isImporting = true
         progress = "Retrying…"
-        defer { if importSession == session { isImporting = false }; progress = nil }
+        defer { if importSession == session { isImporting = false }; progress = nil; flushMatchCache() }
         let task = Task {
             tracks[idx].status = .working
             tracks[idx].selected = false
@@ -550,7 +559,7 @@ final class SpotifyImportStore {
         let session = UUID()
         importSession = session
         isImporting = true
-        defer { if importSession == session { isImporting = false }; progress = nil }
+        defer { if importSession == session { isImporting = false }; progress = nil; flushMatchCache() }
         let task = Task {
             var done = 0
             for id in ids {

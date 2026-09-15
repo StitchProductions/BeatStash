@@ -25,8 +25,32 @@ public struct DeezerTrack: Sendable, Decodable {
 }
 
 public enum DeezerClient: Sendable {
+    private actor MemoStore {
+        var memo: [String: (track: DeezerTrack?, at: Date)] = [:]
+        func get(_ key: String) -> DeezerTrack?? {
+            guard let hit = memo[key], Date().timeIntervalSince(hit.at) < 600 else { return nil }
+            return .some(hit.track)
+        }
+        func set(_ key: String, track: DeezerTrack?) {
+            if memo.count > 500 { memo.removeAll() }
+            memo[key] = (track, Date())
+        }
+    }
+    private static let store = MemoStore()
+
     /// Top search hit, or nil (never throws — absence just unanchors scoring).
+    /// Session memo (10 min): re-imports and auto-retries never re-query the
+    /// same `artist + title`. Final YouTube matches were already memoized;
+    /// this covers the anchor leg too.
     public static func search(artist: String, title: String) async -> DeezerTrack? {
+        let key = "\(artist.lowercased())\0\(title.lowercased())"
+        if let hit = await store.get(key) { return hit }
+        let found = await searchUncached(artist: artist, title: title)
+        await store.set(key, track: found)
+        return found
+    }
+
+    private static func searchUncached(artist: String, title: String) async -> DeezerTrack? {
         var comps = URLComponents(string: "https://api.deezer.com/search")!
         comps.queryItems = [URLQueryItem(
             name: "q", value: "\(artist) \(title)".trimmingCharacters(in: .whitespaces))]

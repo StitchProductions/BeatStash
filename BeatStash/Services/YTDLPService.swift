@@ -128,18 +128,43 @@ public actor YTDLPService: Sendable {
     /// One tiny request (~0.15s): title/author/thumbnail, no duration or date.
     /// Throws on non-200 (age-gated/private/deleted) and offline — callers
     /// treat any failure as "fall through to the full probe".
+    /// Session memo (10-min hits, 2-min misses): repeat pastes within a run
+    /// never re-hit the network. Misses are cached too — a dead link pasted
+    /// twice costs one request, not two.
+    private var oEmbedHits: [String: (video: OEmbedVideo, at: Date)] = [:]
+    private var oEmbedMisses: [String: Date] = [:]
     public func fetchOEmbed(url: String) async throws -> OEmbedVideo {
+        let key = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let hit = oEmbedHits[key], Date().timeIntervalSince(hit.at) < 600 {
+            return hit.video
+        }
+        if let miss = oEmbedMisses[key], Date().timeIntervalSince(miss) < 120 {
+            throw ServiceError.parseFailed("oEmbed recent miss")
+        }
         guard let endpoint = Self.oEmbedURL(for: url) else {
             throw ServiceError.parseFailed("bad URL")
         }
-        let (data, response) = try await URLSession.shared.data(
-            for: URLRequest(url: endpoint, timeoutInterval: 10))
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-            throw ServiceError.parseFailed("oEmbed status \(code)")
-        }
-        return try await MainActor.run {
-            try JSONDecoder().decode(OEmbedVideo.self, from: data)
+        do {
+            let (data, response) = try await URLSession.shared.data(
+                for: URLRequest(url: endpoint, timeoutInterval: 10))
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+                oEmbedMisses[key] = Date()
+                throw ServiceError.parseFailed("oEmbed status \(code)")
+            }
+            let video = try await MainActor.run {
+                try JSONDecoder().decode(OEmbedVideo.self, from: data)
+            }
+            oEmbedHits[key] = (video, Date())
+            return video
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let e as ServiceError {
+            if case .parseFailed = e { oEmbedMisses[key] = Date() }
+            throw e
+        } catch {
+            oEmbedMisses[key] = Date()
+            throw error
         }
     }
 
@@ -206,13 +231,29 @@ public actor YTDLPService: Sendable {
         return nil
     }
 
-    /// Warms the session cache and persists to disk. Callers are async already.
+    /// Warms the session cache and persists to disk (throttled: at most one
+    /// full-file rewrite per 10s during batch fetches — the file grows with
+    /// every probe, so N serial probes cost N rewrites otherwise).
+    /// Cache-only: a crash loses at most re-probeable entries, never user data.
+    /// Call `flushProbeCache()` at the end of a batch for an exact persist.
+    private var lastDiskPersist = Date.distantPast
     private func cacheProbePersisting(key: String, result: ProbeResult, raw: String? = nil) async {
         cacheProbe(key: key, result: result, raw: raw)
         if diskCache == nil {
             diskCache = await Self.readDiskCacheFile()
         }
         diskCache?[key] = DiskProbeEntry(at: Date(), result: result)
+        guard Date().timeIntervalSince(lastDiskPersist) > 10 else { return }
+        lastDiskPersist = Date()
+        await Self.writeDiskCacheFile(diskCache ?? [:])
+    }
+
+    /// Exact persist for end-of-batch (see above). Cheap when nothing changed.
+    public func flushProbeCache() async {
+        lastDiskPersist = Date()
+        if diskCache == nil {
+            diskCache = await Self.readDiskCacheFile()
+        }
         await Self.writeDiskCacheFile(diskCache ?? [:])
     }
 
@@ -337,7 +378,10 @@ public actor YTDLPService: Sendable {
             if attempt > 0 {
                 try Task.checkCancellation()
                 Self.log.info("search retry \(attempt, privacy: .public)/2 after backoff: \(query.prefix(40), privacy: .public)")
-                try await Task.sleep(nanoseconds: UInt64([5, 15][attempt - 1]) * 1_000_000_000)
+                // ±20% jitter so concurrent jobs don't retry in lockstep.
+                let base = Double([5, 15][attempt - 1])
+                let delay = base * Double.random(in: 0.8...1.2)
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             }
             do {
                 let out = try await runCapture(exe: ytDlp, args: args, timeout: 45)
@@ -376,7 +420,8 @@ public actor YTDLPService: Sendable {
     }
 
     /// Line-delimited flat JSON → indexed entries, or `nil` for singles.
-    /// MainActor: the `PlaylistEntry` Decodable conformance lives there.
+    /// MainActor: `PlaylistEntry` Codable synthesis is MainActor-isolated
+    /// under the target's default isolation; keep decode there (zero-warning).
     @MainActor static func parseFlatEntries(from stdout: String) -> [PlaylistEntry]? {
         let lines = stdout.components(separatedBy: .newlines)
             .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
@@ -445,13 +490,14 @@ public actor YTDLPService: Sendable {
     }
 
     /// Tolerates leading non-JSON lines: decodes the first line that parses.
-    /// MainActor: `MediaInfo`'s Codable conformance lives there with the model.
+    /// MainActor: `MediaInfo` Codable synthesis is MainActor-isolated (see above).
     @MainActor static func decodeMedia(from stdout: String) -> MediaInfo? {
         decodeMediaWithRaw(from: stdout)?.media
     }
 
     /// Decode plus the exact JSON line that parsed (for `--load-info-json`,
     /// which needs pure JSON — warning lines would choke it).
+    /// MainActor: same isolation reason as above.
     @MainActor static func decodeMediaWithRaw(from stdout: String) -> (media: MediaInfo, raw: String)? {
         let decoder = JSONDecoder()
         // Most common: single JSON object (possibly multi-line? no — one line).
@@ -721,13 +767,21 @@ public actor YTDLPService: Sendable {
 
     /// Strips a trailing " · Ns" elapsed suffix so the store's ticker can
     /// re-stamp it every second without stacking suffixes. Pure (tested).
+    /// Regex is precompiled (per-tick recompile was pure overhead).
     nonisolated static func strippingElapsedSuffix(_ phase: String) -> String {
         var s = phase
-        while let range = s.range(of: #" · \d+s$"#, options: .regularExpression) {
-            s.removeSubrange(range)
+        while let m = elapsedSuffixRegex.firstMatch(
+            in: s, range: NSRange(s.startIndex..., in: s)),
+            let r = Range(m.range, in: s) {
+            s.removeSubrange(r)
         }
         return s
     }
+
+    private static let elapsedSuffixRegex: NSRegularExpression = {
+        // swiftlint:disable:next force_try
+        try! NSRegularExpression(pattern: #" · \d+s$"#)
+    }()
 
     /// One process run for a single client chain (isolated so `active`
     /// bookkeeping is safe).
@@ -801,7 +855,8 @@ public actor YTDLPService: Sendable {
 
             // First-output watchdog: a hung extraction prints nothing —
             // kill it into client fallback instead of Preparing… forever.
-            Task {
+            // Cancelled on termination so fast downloads don't leave sleepers.
+            let watchdog = Task {
                 try? await Task.sleep(nanoseconds: UInt64(Self.downloadFirstOutputTimeout * 1_000_000_000))
                 if !finished.value, !sawOutput.value, box.process.isRunning {
                     timedOut.set()
@@ -831,6 +886,7 @@ public actor YTDLPService: Sendable {
 
             process.terminationHandler = { proc in
                 finished.set()
+                watchdog.cancel()
                 outHandle.readabilityHandler = nil
                 clearActiveIfCurrent(proc)
                 releaseExtractionOnce()
@@ -862,6 +918,7 @@ public actor YTDLPService: Sendable {
                 try process.run()
             } catch {
                 finished.set()
+                watchdog.cancel()
                 // A failed launch leaves a never-launched Process behind:
                 // clear it here or a later cancel() would terminate() it and
                 // take the whole app down (NSInvalidArgumentException).
@@ -1022,21 +1079,27 @@ public actor YTDLPService: Sendable {
 
     /// `--plugin-dirs` + `--js-runtimes` only when both exist on disk.
     /// Keeps stock installs working with zero extra dependencies.
+    /// Bundle path + runtime lookups are memoized (they never change mid-run).
     private func pluginArgs() -> [String] {
         var args: [String] = []
-        let fm = FileManager.default
-        if let res = Bundle.main.resourceURL {
-            let plugins = res.appendingPathComponent("plugins").path
-            var isDir: ObjCBool = false
-            if fm.fileExists(atPath: plugins, isDirectory: &isDir), isDir.boolValue {
-                args += ["--plugin-dirs", plugins]
-            }
+        if let plugins = Self.cachedPluginsDir {
+            args += ["--plugin-dirs", plugins]
         }
         if Self.jsRuntimeAvailable() {
             args += ["--js-runtimes", "node:deno"]
         }
         return args
     }
+
+    private static let cachedPluginsDir: String? = {
+        guard let res = Bundle.main.resourceURL else { return nil }
+        let plugins = res.appendingPathComponent("plugins").path
+        var isDir: ObjCBool = false
+        if FileManager.default.fileExists(atPath: plugins, isDirectory: &isDir), isDir.boolValue {
+            return plugins
+        }
+        return nil
+    }()
 
     /// Any JS runtime yt-dlp can use for challenges / PO-token generation.
     static func jsRuntimeAvailable() -> Bool {
@@ -1050,6 +1113,23 @@ public actor YTDLPService: Sendable {
     }
 
     private static func which(_ name: String) -> String? {
+        whichCacheLock.lock()
+        if let hit = whichCache[name] {
+            whichCacheLock.unlock()
+            return hit
+        }
+        whichCacheLock.unlock()
+        let found = whichUncached(name)
+        whichCacheLock.lock()
+        whichCache[name] = found
+        whichCacheLock.unlock()
+        return found
+    }
+
+    private static let whichCacheLock = NSLock()
+    private static var whichCache: [String: String?] = [:]
+
+    private static func whichUncached(_ name: String) -> String? {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/which")
         p.arguments = [name]

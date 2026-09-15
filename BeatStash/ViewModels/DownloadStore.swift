@@ -58,8 +58,18 @@ final class DownloadStore {
         }
         maxConcurrent = UserDefaults.standard.integer(forKey: "maxConcurrent")
         if maxConcurrent <= 0 { maxConcurrent = 3 }
+        Self.ensureStoreDirs()
         loadHistory()
         loadQueue()
+    }
+
+    /// Creates ~/Library/Application Support/BeatStash once per launch.
+    /// Getters must not do I/O — they run on every save.
+    private static func ensureStoreDirs() {
+        guard queueFileOverride == nil, historyFileOverride == nil else { return }
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("BeatStash", isDirectory: true)
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
     }
 
     // MARK: - Setup
@@ -148,9 +158,13 @@ final class DownloadStore {
 
     /// Post-launch currency check. Surfaces a new version (or a
     /// stale-aware banner on failure) without ever blocking the UI.
+    /// Skips the second bootstrap unless the version actually changed —
+    /// the launch-time state is already current otherwise.
     private func refreshCurrencyInBackground() async {
-        _ = await BinaryManager.shared.checkAndUpdateIfNeeded(ignoreCache: true)
-        await bootstrap()
+        let outcome = await BinaryManager.shared.checkAndUpdateIfNeeded(ignoreCache: true)
+        if case .updated = outcome {
+            await bootstrap()
+        }
     }
 
     func bootstrap() async {
@@ -437,6 +451,7 @@ final class DownloadStore {
     /// IP (measured 3-at-a-time at ~70s with timeouts vs ~13–19s each serially).
     private func probeAll(urls: [String], label: String = "Fetching") async throws -> [ProbeOutcome] {
         var ordered: [ProbeOutcome] = []
+        defer { Task { await service.flushProbeCache() } }
         for (i, url) in urls.enumerated() {
             try Task.checkCancellation()
             do {
@@ -795,7 +810,12 @@ final class DownloadStore {
                           phase.hasPrefix("Preparing") else { return }
                     let base = YTDLPService.strippingElapsedSuffix(phase)
                     let secs = Int(Date().timeIntervalSince(start))
-                    self.queue[i].phaseLabel = secs >= 2 ? "\(base) · \(secs)s" : base
+                    // No-op guard: before 2s the label is just `base` — don't
+                    // invalidate the whole store every second for no change.
+                    let next = secs >= 2 ? "\(base) · \(secs)s" : base
+                    if self.queue[i].phaseLabel != next {
+                        self.queue[i].phaseLabel = next
+                    }
                 }
             }
         }
@@ -880,7 +900,17 @@ final class DownloadStore {
         Task {
             do {
                 let stream = await service.download(job: job, to: dir)
+                // Coalesce fraction-only ticks to ~5Hz: yt-dlp emits lines far
+                // faster than the eye (or SwiftUI) needs. Phase changes and
+                // completion always flush immediately — same end state, ~10x
+                // fewer MainActor hops and store invalidations.
+                var lastFlush = Date.distantPast
                 for try await update in stream {
+                    let isPhase = update.phase != nil
+                    let isDone = update.fraction >= 1
+                    if !isPhase, !isDone, update.fraction > 0,
+                       Date().timeIntervalSince(lastFlush) < 0.2 { continue }
+                    lastFlush = Date()
                     await MainActor.run {
                         if let i = self.queue.firstIndex(where: { $0.id == jobID }) {
                             if update.fraction > 0 {
@@ -1023,10 +1053,9 @@ final class DownloadStore {
 
     private var historyURL: URL {
         if let override = Self.historyFileOverride { return override }
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("BeatStash", isDirectory: true)
-        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        return base.appendingPathComponent("history.json")
+            .appendingPathComponent("history.json")
     }
 
     /// Test seam: redirect the history file (headless + Xcode tests).
@@ -1050,17 +1079,16 @@ final class DownloadStore {
 
     /// Versioned wrapper so future shapes fail soft (empty queue, never a
     /// launch crash) instead of decoding garbage into rows.
-    private struct PersistedQueue: Codable {
+    private nonisolated struct PersistedQueue: Codable {
         var version: Int
         var jobs: [DownloadJob]
     }
 
     private var queueURL: URL {
         if let override = Self.queueFileOverride { return override }
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
             .appendingPathComponent("BeatStash", isDirectory: true)
-        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-        return base.appendingPathComponent("queue.json")
+            .appendingPathComponent("queue.json")
     }
 
     /// Test seam: redirect the queue file (headless + Xcode tests).
